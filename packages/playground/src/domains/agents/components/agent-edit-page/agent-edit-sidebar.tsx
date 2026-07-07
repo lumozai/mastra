@@ -1,22 +1,17 @@
-import {
-  Button,
-  Input,
-  JSONSchemaForm,
-  jsonSchemaToFields,
-  Label,
-  ScrollArea,
-  Spinner,
-  Tabs,
-  TabList,
-  Tab,
-  TabContent,
-  Textarea,
-  Icon,
-  AgentIcon,
-  ToolsIcon,
-  VariablesIcon,
-} from '@mastra/playground-ui';
-import type { JsonSchema } from '@mastra/playground-ui';
+import { Button } from '@mastra/playground-ui/components/Button';
+import { Input } from '@mastra/playground-ui/components/Input';
+import { JSONSchemaForm, jsonSchemaToFields } from '@mastra/playground-ui/components/JSONSchemaForm';
+import type { SchemaField } from '@mastra/playground-ui/components/JSONSchemaForm';
+import { Label } from '@mastra/playground-ui/components/Label';
+import { ScrollArea } from '@mastra/playground-ui/components/ScrollArea';
+import { Spinner } from '@mastra/playground-ui/components/Spinner';
+import { Tabs, TabList, Tab, TabContent } from '@mastra/playground-ui/components/Tabs';
+import { Textarea } from '@mastra/playground-ui/components/Textarea';
+import { AgentIcon } from '@mastra/playground-ui/icons/AgentIcon';
+import { Icon } from '@mastra/playground-ui/icons/Icon';
+import { ToolsIcon } from '@mastra/playground-ui/icons/ToolsIcon';
+import { VariablesIcon } from '@mastra/playground-ui/icons/VariablesIcon';
+import type { JsonSchema } from '@mastra/playground-ui/utils/json-schema';
 import { Check, PlusIcon } from 'lucide-react';
 import { useCallback, useMemo } from 'react';
 import type { RefObject } from 'react';
@@ -26,7 +21,6 @@ import type { UseFormReturn } from 'react-hook-form';
 import { ToolsSection, WorkflowsSection, AgentsSection, ScorersSection, MemorySection } from './sections';
 import type { AgentFormValues } from './utils/form-validation';
 import { SectionHeader } from '@/domains/cms';
-import type { SchemaField } from '@/domains/datasets/components/schema-settings/schema-field';
 import { LLMProviders, LLMModels } from '@/domains/llm';
 
 function RecursiveFieldRenderer({
@@ -51,7 +45,7 @@ function RecursiveFieldRenderer({
             />
 
             <JSONSchemaForm.FieldType placeholder="Type" size="md" className="[&_button]:bg-surface3 w-full" />
-            <JSONSchemaForm.FieldRemove variant="light" size="md" className="shrink-0" />
+            <JSONSchemaForm.FieldRemove variant="default" className="shrink-0" />
           </div>
 
           <div className="flex flex-row gap-2 items-center">

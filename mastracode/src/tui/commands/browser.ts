@@ -1,5 +1,3 @@
-import { Spacer } from '@mariozechner/pi-tui';
-
 import type { MastraBrowser } from '@mastra/core/browser';
 
 import type { BrowserProvider, BrowserSettings, StagehandEnv } from '../../onboarding/settings.js';
@@ -10,15 +8,18 @@ import {
   saveSettings,
   setProfileProvider,
 } from '../../onboarding/settings.js';
-import { AskQuestionInlineComponent } from '../components/ask-question-inline.js';
+import { askModalQuestion } from '../modal-question.js';
 import type { SlashCommandContext } from './types.js';
 
 /**
- * Key used to store the active browser settings in harness state.
+ * Key used to store the active browser settings in controller state.
  * This tracks what browser config is actually running in this instance,
  * which may differ from the settings file if another instance changed it.
  */
 const ACTIVE_BROWSER_KEY = 'activeBrowserSettings';
+
+type BrowserAgent = { browser?: MastraBrowser; setBrowser?: (browser?: MastraBrowser) => void };
+type StorageStateExportBrowser = MastraBrowser & { exportStorageState: (path: string) => Promise<void> };
 
 /**
  * /browser command - Configure browser automation for agents.
@@ -39,68 +40,16 @@ function askInline(
   question: string,
   options: Array<{ label: string; description?: string }>,
 ): Promise<string | null> {
-  return new Promise(resolve => {
-    const questionComponent = new AskQuestionInlineComponent(
-      {
-        question,
-        options,
-        formatResult: answer => answer,
-        onSubmit: answer => {
-          ctx.state.activeInlineQuestion = undefined;
-          resolve(answer);
-        },
-        onCancel: () => {
-          ctx.state.activeInlineQuestion = undefined;
-          resolve(null);
-        },
-      },
-      ctx.state.ui,
-    );
-
-    ctx.state.activeInlineQuestion = questionComponent;
-    ctx.state.chatContainer.addChild(new Spacer(1));
-    ctx.state.chatContainer.addChild(questionComponent);
-    ctx.state.chatContainer.addChild(new Spacer(1));
-    ctx.state.ui.requestRender();
-    ctx.state.chatContainer.invalidate();
-  });
+  return askModalQuestion(ctx.state.ui, { question, options });
 }
 
 /**
  * Helper to show an inline text input and return the answer.
  */
-function askText(ctx: SlashCommandContext, question: string, defaultValue?: string): Promise<string | null> {
-  return new Promise(resolve => {
-    const questionComponent = new AskQuestionInlineComponent(
-      {
-        question,
-        allowEmptyInput: true,
-        formatResult: answer => answer || '(empty)',
-        onSubmit: answer => {
-          ctx.state.activeInlineQuestion = undefined;
-          const trimmed = answer.trim();
-          resolve(trimmed.length > 0 ? trimmed : null);
-        },
-        onCancel: () => {
-          ctx.state.activeInlineQuestion = undefined;
-          resolve(null);
-        },
-      },
-      ctx.state.ui,
-    );
-
-    // Set default value if provided
-    if (defaultValue) {
-      (questionComponent as any).input?.setValue?.(defaultValue);
-    }
-
-    ctx.state.activeInlineQuestion = questionComponent;
-    ctx.state.chatContainer.addChild(new Spacer(1));
-    ctx.state.chatContainer.addChild(questionComponent);
-    ctx.state.chatContainer.addChild(new Spacer(1));
-    ctx.state.ui.requestRender();
-    ctx.state.chatContainer.invalidate();
-  });
+async function askText(ctx: SlashCommandContext, question: string, defaultValue?: string): Promise<string | null> {
+  const answer = await askModalQuestion(ctx.state.ui, { question, defaultValue, allowEmptyInput: true });
+  const trimmed = answer?.trim() ?? '';
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 /**
@@ -136,18 +85,27 @@ async function checkAndConfirmProviderMismatch(
 /**
  * Apply browser settings to all mode agents and track the active settings.
  */
+function resolveModeAgent(mode: unknown, agentControllerState: unknown): BrowserAgent | undefined {
+  const modeAgent = (mode as { agent?: unknown }).agent;
+  return typeof modeAgent === 'function'
+    ? (modeAgent(agentControllerState) as BrowserAgent)
+    : (modeAgent as BrowserAgent | undefined);
+}
+
 function applyBrowserToAgents(
   ctx: SlashCommandContext,
   browser: MastraBrowser | undefined,
   browserSettings?: BrowserSettings,
 ): void {
-  const modes = ctx.harness.listModes();
+  const modes = ctx.controller.listModes();
+  let agentControllerState: unknown;
   for (const mode of modes) {
-    const agent = typeof mode.agent === 'function' ? mode.agent(ctx.state.harness.getState()) : mode.agent;
-    agent.setBrowser(browser);
+    const agent = resolveModeAgent(mode, (agentControllerState ??= ctx.state.session.state.get()));
+    agent?.setBrowser?.(browser);
   }
-  // Track the active browser settings in harness state
-  ctx.harness.setState({ [ACTIVE_BROWSER_KEY]: browserSettings } as any);
+  ctx.controller.setBrowser?.(browser);
+  // Track the active browser settings in controller state
+  void ctx.state.session.state.set({ [ACTIVE_BROWSER_KEY]: browserSettings } as any);
 }
 
 /**
@@ -274,8 +232,8 @@ export async function handleBrowserCommand(ctx: SlashCommandContext, args: strin
   }
 
   if (arg === 'status') {
-    // Get the active browser settings from harness state (what's actually running)
-    const state = ctx.harness.getState() as any;
+    // Get the active browser settings from controller state (what's actually running)
+    const state = ctx.state.session.state.get() as any;
     const activeSettings = state?.[ACTIVE_BROWSER_KEY] as BrowserSettings | undefined;
 
     // Check for config drift between file and active instance
@@ -477,11 +435,14 @@ export async function handleBrowserCommand(ctx: SlashCommandContext, args: strin
       return;
     }
 
-    // Get browser instance from the current mode's agent
-    const currentMode = ctx.harness.getCurrentMode();
-    const agent =
-      typeof currentMode.agent === 'function' ? currentMode.agent(ctx.state.harness.getState()) : currentMode.agent;
-    const browserInstance = agent.browser;
+    const currentMode = ctx.state.session.mode.resolve();
+    const currentAgent = resolveModeAgent(currentMode, ctx.state.session.state.get());
+    let browserInstance = currentAgent?.browser;
+
+    if (!browserInstance && browser.enabled) {
+      browserInstance = await createBrowserFromSettings(browser);
+      applyBrowserToAgents(ctx, browserInstance, browser);
+    }
 
     if (!browserInstance) {
       ctx.showError('Browser not enabled. Run /browser on first.');
@@ -493,11 +454,12 @@ export async function handleBrowserCommand(ctx: SlashCommandContext, args: strin
       ctx.showError('Current browser instance does not support exporting storage state.');
       return;
     }
+    const exportableBrowser = browserInstance as StorageStateExportBrowser;
 
     const expandedPath = exportPath.replace(/^~/, process.env.HOME || '~');
 
     try {
-      await browserInstance.exportStorageState(expandedPath);
+      await exportableBrowser.exportStorageState(expandedPath);
       ctx.showInfo(`Storage state exported to: ${expandedPath}`);
     } catch (error) {
       ctx.showError(`Failed to export storage state: ${error instanceof Error ? error.message : String(error)}`);
@@ -608,6 +570,13 @@ export async function handleBrowserCommand(ctx: SlashCommandContext, args: strin
   let executablePath = browser.executablePath;
   let storageState = browser.agentBrowser?.storageState;
   let cdpUrl = browser.cdpUrl;
+
+  if (isBrowserbase) {
+    cdpUrl = undefined;
+    profile = undefined;
+    executablePath = undefined;
+    storageState = undefined;
+  }
 
   // Only show launch mode options for local browsers (not Browserbase)
   if (!isBrowserbase) {

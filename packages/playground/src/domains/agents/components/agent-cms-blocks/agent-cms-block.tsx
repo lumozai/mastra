@@ -1,18 +1,8 @@
 import type { DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
-import type { RuleGroup, JsonSchema } from '@mastra/playground-ui';
+import { Button } from '@mastra/playground-ui/components/Button';
+import { CodeEditor } from '@mastra/playground-ui/components/CodeEditor';
+import { ContentBlock } from '@mastra/playground-ui/components/ContentBlocks';
 import {
-  Button,
-  CodeEditor,
-  ContentBlock,
-  IconButton,
-  Input,
-  Label,
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-  Txt,
-  Icon,
-  cn,
   Dialog,
   DialogContent,
   DialogHeader,
@@ -20,7 +10,15 @@ import {
   DialogDescription,
   DialogBody,
   DialogFooter,
-} from '@mastra/playground-ui';
+} from '@mastra/playground-ui/components/Dialog';
+import { Input } from '@mastra/playground-ui/components/Input';
+import { Label } from '@mastra/playground-ui/components/Label';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@mastra/playground-ui/components/Tooltip';
+import { Txt } from '@mastra/playground-ui/components/Txt';
+import { Icon } from '@mastra/playground-ui/icons/Icon';
+import { cn } from '@mastra/playground-ui/utils/cn';
+import type { JsonSchema } from '@mastra/playground-ui/utils/json-schema';
+import type { RuleGroup } from '@mastra/playground-ui/utils/rule-engine';
 import type { ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { GripVertical, X, BookmarkPlus } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -41,6 +39,7 @@ export interface AgentCMSBlockProps {
   className?: string;
   schema?: JsonSchema;
   autoFocus?: boolean;
+  readOnly?: boolean;
 }
 
 interface InlineBlockContentProps {
@@ -53,6 +52,7 @@ interface InlineBlockContentProps {
   onDelete?: () => void;
   schema?: JsonSchema;
   autoFocus?: boolean;
+  readOnly?: boolean;
 }
 
 const SaveAsPromptBlockDialog = ({
@@ -126,7 +126,7 @@ const SaveAsPromptBlockDialog = ({
             <Button type="button" variant="outline" size="sm" onClick={() => onOpenChange(false)}>
               Cancel
             </Button>
-            <Button type="submit" variant="cta" size="sm" disabled={!name.trim() || isPending}>
+            <Button type="submit" variant="primary" size="sm" disabled={!name.trim() || isPending}>
               {isPending ? 'Saving...' : 'Save'}
             </Button>
           </DialogFooter>
@@ -146,6 +146,7 @@ const InlineBlockContent = ({
   onDelete,
   schema,
   autoFocus = false,
+  readOnly = false,
 }: InlineBlockContentProps) => {
   const editorRef = useRef<ReactCodeMirrorRef>(null);
 
@@ -193,47 +194,56 @@ const InlineBlockContent = ({
 
   return (
     <>
-      <div className="relative group rounded-md transition-colors duration-150 hover:bg-surface2/50">
+      <div
+        className={cn(
+          'relative group rounded-md transition-colors duration-150 hover:bg-surface2/50',
+          !readOnly && 'pr-20',
+        )}
+      >
         {/* Left gutter — drag handle (visible on hover/focus-within) */}
-        <div className="absolute -left-8 top-1 flex flex-col items-center transition-opacity duration-150 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
-          <div {...dragHandleProps} className="text-neutral3 hover:text-neutral6 cursor-grab active:cursor-grabbing">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Icon>
-                  <GripVertical />
-                </Icon>
-              </TooltipTrigger>
-              <TooltipContent side="left">Drag to reorder</TooltipContent>
-            </Tooltip>
+        {!readOnly && (
+          <div className="absolute -left-8 top-1 flex flex-col items-center transition-opacity duration-150 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
+            <div {...dragHandleProps} className="text-neutral3 hover:text-neutral6 cursor-grab active:cursor-grabbing">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Icon>
+                    <GripVertical />
+                  </Icon>
+                </TooltipTrigger>
+                <TooltipContent side="left">Drag to reorder</TooltipContent>
+              </Tooltip>
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Right toolbar — conditions + save as ref + delete (visible on hover/focus-within) */}
-        <div className="absolute -right-1 top-1 z-10 flex items-center gap-0.5 transition-opacity duration-150 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
-          <DisplayConditionsDialog
-            entityName={`Block ${index + 1}`}
-            schema={schema}
-            rules={block.rules}
-            onRulesChange={handleRulesChange}
-          />
+        {!readOnly && (
+          <div className="absolute right-0 top-1 z-10 flex items-center gap-0.5 transition-opacity duration-150 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
+            <DisplayConditionsDialog
+              entityName={`Block ${index + 1}`}
+              schema={schema}
+              rules={block.rules}
+              onRulesChange={handleRulesChange}
+            />
 
-          {onConvertToRef && block.content.trim().length > 0 && (
-            <IconButton
-              variant="ghost"
-              size="sm"
-              onClick={() => setSaveDialogOpen(true)}
-              tooltip="Save as prompt block"
-            >
-              <BookmarkPlus />
-            </IconButton>
-          )}
+            {onConvertToRef && block.content.trim().length > 0 && (
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => setSaveDialogOpen(true)}
+                tooltip="Save as prompt block"
+              >
+                <BookmarkPlus />
+              </Button>
+            )}
 
-          {onDelete && (
-            <IconButton variant="ghost" size="sm" onClick={onDelete} tooltip="Delete block">
-              <X />
-            </IconButton>
-          )}
-        </div>
+            {onDelete && (
+              <Button variant="ghost" size="icon-sm" onClick={onDelete} tooltip="Delete block">
+                <X />
+              </Button>
+            )}
+          </div>
+        )}
 
         {/* CodeEditor — seamless, no border */}
         <CodeEditor
@@ -248,6 +258,7 @@ const InlineBlockContent = ({
           schema={schema}
           autoFocus={autoFocus}
           lineNumbers={false}
+          editable={!readOnly}
         />
       </div>
 
@@ -276,16 +287,18 @@ export const AgentCMSBlock = ({
   className,
   schema,
   autoFocus,
+  readOnly = false,
 }: AgentCMSBlockProps) => {
   if (block.type === 'prompt_block_ref') {
     return (
       <AgentCMSRefBlock
         index={index}
         block={block}
-        onDelete={onDelete}
-        onDereference={onDereference}
+        onDelete={readOnly ? undefined : onDelete}
+        onDereference={readOnly ? undefined : onDereference}
         className={className}
         schema={schema}
+        readOnly={readOnly}
       />
     );
   }
@@ -305,6 +318,7 @@ export const AgentCMSBlock = ({
           onDelete={onDelete ? () => onDelete(index) : undefined}
           schema={schema}
           autoFocus={autoFocus}
+          readOnly={readOnly}
         />
       )}
     </ContentBlock>

@@ -1,6 +1,6 @@
 import type { TestProject } from 'vitest/node';
 import { prepareMonorepo } from '../_local-registry-setup/prepare.js';
-import { globby } from 'globby';
+import { glob as globby } from 'tinyglobby';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import getPort from 'get-port';
@@ -32,7 +32,12 @@ export default async function setup(project: TestProject) {
   project.provide('tag', tag);
   project.provide('registry', registry.toString());
 
-  await publishPackages(['--filter="@mastra/core..."', '--filter="@mastra/client-js..."'], tag, rootDir, registry);
+  await publishPackages(
+    ['--filter="@mastra/core..."', '--filter="@mastra/client-js..."', '--filter="@mastra/auth-workos..."'],
+    tag,
+    rootDir,
+    registry,
+  );
 
   return () => {
     teardown();

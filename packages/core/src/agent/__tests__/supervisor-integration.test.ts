@@ -1036,31 +1036,25 @@ describe('Supervisor Pattern - Tool approval propagation', () => {
       toolCallId: approvalToolCallId,
     });
 
-    let toolDeclinedMessage = '';
-
     for await (const _chunk of resumeStream.fullStream) {
-      // consume
-      if (_chunk.type === 'tool-output') {
-        const output = _chunk.payload.output;
-        if (output.type === 'tool-result' && output.payload.toolName === 'find-user-tool-decline') {
-          toolDeclinedMessage = output.payload.result;
-        }
-      }
+      // consume — output-denied calls emit no tool-result chunk for the sub-agent's declined tool
     }
 
     const toolResults = await resumeStream.toolResults;
 
     // Verify tool was NOT executed
     expect(mockFindUser).not.toHaveBeenCalled();
-
-    // Verify we got tool results from the sub-agent delegation
+    // The supervisor still gets a tool-result for the agent delegation itself,
+    // even though the sub-agent's tool was output-denied.
     expect(toolResults.length).toBeGreaterThan(0);
 
-    // The supervisor's tool result for the agent delegation should contain the sub-agent's response
+    // The delegation result must still carry the sub-agent's declined outcome — not just exist.
+    // A regression that dropped the denied path would leave the sub-agent unable to report back,
+    // so assert the supervisor-facing result surfaces the decline.
     const subAgentResult = toolResults.find(tr => tr.payload?.toolName === 'agent-approvalDeclineSubAgent');
     expect(subAgentResult).toBeDefined();
     expect(subAgentResult?.payload?.result).toBeDefined();
-    expect(toolDeclinedMessage).toBe('Tool call was not approved by the user');
+    expect(JSON.stringify(subAgentResult?.payload?.result)).toMatch(/declin/i);
   });
 });
 
@@ -3076,6 +3070,162 @@ describe('Supervisor Pattern - Message history transfer to sub-agents', () => {
     expect(promptStr).toContain('Do the task please');
   });
 
+  it('should hide sub-agent tool results from supervisor model context while preserving raw tool results', async () => {
+    const nestedToolArg = 'SECRET_NESTED_TOOL_ARG';
+    const nestedToolResult = 'SECRET_NESTED_TOOL_RESULT';
+    const rawSubAgentText = 'Task completed.';
+    const processedSubAgentText = 'Processed summary without nested tool details.';
+
+    const isTextPart = (part: unknown): part is { type: 'text'; text?: string } =>
+      typeof part === 'object' && part !== null && (part as { type?: unknown }).type === 'text';
+
+    const getAgentToolPayload = (
+      toolResult: unknown,
+    ): { toolName?: string; result?: { subAgentToolResults?: unknown } } | undefined => {
+      if (typeof toolResult !== 'object' || toolResult === null) return undefined;
+
+      const payload = (toolResult as { payload?: unknown }).payload;
+      if (typeof payload !== 'object' || payload === null) return undefined;
+
+      return payload as { toolName?: string; result?: { subAgentToolResults?: unknown } };
+    };
+
+    const textTransformProcessor: Processor<'text-transform'> = {
+      id: 'text-transform',
+      async processOutputResult(args: ProcessOutputResultArgs) {
+        return args.messages.map(msg => {
+          if (msg.role !== 'assistant') return msg;
+          const parts = msg.content?.parts ?? [];
+          return {
+            ...msg,
+            content: {
+              ...msg.content,
+              format: msg.content?.format ?? 2,
+              parts: parts.map(part => (isTextPart(part) ? { ...part, text: processedSubAgentText } : part)),
+            },
+          };
+        });
+      },
+    };
+
+    const subAgentTool = createTool({
+      id: 'lookup-secret',
+      description: 'Looks up private data',
+      inputSchema: z.object({
+        query: z.string(),
+      }),
+      execute: async ({ query }) => ({
+        query,
+        secret: nestedToolResult,
+        records: [{ id: 'private-record', value: nestedToolResult }],
+      }),
+    });
+
+    const runSupervisor = async (includeSubAgentToolResultsInModelContext?: boolean) => {
+      const supervisorPrompts: unknown[] = [];
+
+      const subAgent = new Agent({
+        id: 'context-isolation-sub-agent',
+        name: 'context-isolation-sub-agent',
+        description: 'A sub-agent that uses a nested tool',
+        instructions: 'Use lookupSecret, then summarize the result.',
+        model: makeSubAgentModelWithTool('lookupSecret', { query: nestedToolArg }),
+        tools: { lookupSecret: subAgentTool },
+        outputProcessors: [textTransformProcessor],
+      });
+
+      let supervisorCallCount = 0;
+      const supervisorAgent = new Agent({
+        id: 'context-isolation-supervisor',
+        name: 'context-isolation-supervisor',
+        instructions: 'Delegate to sub-agents.',
+        model: new MockLanguageModelV2({
+          doGenerate: async ({ prompt }) => {
+            supervisorCallCount++;
+            supervisorPrompts.push(prompt);
+
+            if (supervisorCallCount === 1) {
+              return {
+                rawCall: { rawPrompt: null, rawSettings: {} },
+                finishReason: 'tool-calls' as const,
+                usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 },
+                text: '',
+                content: [
+                  {
+                    type: 'tool-call' as const,
+                    toolCallId: 'call-1',
+                    toolName: 'agent-subAgent',
+                    input: JSON.stringify({ prompt: 'Research the private record', maxSteps: 3 }),
+                  },
+                ],
+                warnings: [],
+              };
+            }
+
+            return {
+              rawCall: { rawPrompt: null, rawSettings: {} },
+              finishReason: 'stop' as const,
+              usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 },
+              text: 'Done',
+              content: [{ type: 'text' as const, text: 'Done' }],
+              warnings: [],
+            };
+          },
+        }),
+        agents: { subAgent },
+        memory: new MockMemory(),
+      });
+
+      const delegation =
+        includeSubAgentToolResultsInModelContext === undefined ? {} : { includeSubAgentToolResultsInModelContext };
+
+      const result = await supervisorAgent.generate('Delegate this task', {
+        maxSteps: 5,
+        delegation,
+      });
+
+      expect(supervisorPrompts.length).toBeGreaterThanOrEqual(2);
+
+      return {
+        result,
+        supervisorContextAfterDelegation: JSON.stringify(supervisorPrompts[1]),
+      };
+    };
+
+    const assertTextOnlySupervisorContext = (supervisorContextAfterDelegation: string) => {
+      expect(supervisorContextAfterDelegation).toContain(processedSubAgentText);
+      expect(supervisorContextAfterDelegation).not.toContain(rawSubAgentText);
+      expect(supervisorContextAfterDelegation).not.toContain('subAgentToolResults');
+      expect(supervisorContextAfterDelegation).not.toContain(nestedToolArg);
+      expect(supervisorContextAfterDelegation).not.toContain(nestedToolResult);
+    };
+
+    const implicitDefaultRun = await runSupervisor();
+    assertTextOnlySupervisorContext(implicitDefaultRun.supervisorContextAfterDelegation);
+
+    const defaultRun = await runSupervisor(false);
+    const supervisorContextAfterDelegation = defaultRun.supervisorContextAfterDelegation;
+    assertTextOnlySupervisorContext(supervisorContextAfterDelegation);
+
+    const agentToolResult = defaultRun.result.toolResults
+      .map(getAgentToolPayload)
+      .find(payload => payload?.toolName === 'agent-subAgent')?.result;
+
+    expect(agentToolResult?.subAgentToolResults).toEqual([
+      expect.objectContaining({
+        toolName: 'lookupSecret',
+        args: { query: nestedToolArg },
+        result: expect.objectContaining({ secret: nestedToolResult }),
+      }),
+    ]);
+
+    const optInRun = await runSupervisor(true);
+    expect(optInRun.supervisorContextAfterDelegation).toContain(processedSubAgentText);
+    expect(optInRun.supervisorContextAfterDelegation).toContain('subAgentToolResults');
+    expect(optInRun.supervisorContextAfterDelegation).toContain(nestedToolArg);
+    expect(optInRun.supervisorContextAfterDelegation).toContain(nestedToolResult);
+  });
+
   it('should save only the last user message and response to sub-agent memory (not full supervisor context)', async () => {
     // The supervisor forwards ALL messages as context to the sub-agent (so it can see
     // the full conversation history), but only the immediate delegation prompt + response
@@ -3982,5 +4132,180 @@ describe('Supervisor Pattern - Sub-agent should not receive parent tool call ref
         }
       }
     }
+  });
+});
+
+/**
+ * AbortSignal forwarding in supervisor pattern.
+ * Regression test for #14820: the parent's abortSignal must be forwarded to delegated
+ * sub-agents so that aborting the supervisor stream/generate cancels in-flight sub-agents.
+ * Before the fix, the delegation tool dropped context.abortSignal and the sub-agent ran
+ * with a detached, never-aborted signal.
+ */
+describe('Supervisor Pattern - AbortSignal forwarding', () => {
+  // Sub-agent stream model that calls a tool once, then stops.
+  function makeSubAgentStreamModelWithTool(toolName: string, toolArgs: Record<string, any>) {
+    let callCount = 0;
+    return new MockLanguageModelV2({
+      doStream: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return {
+            rawCall: { rawPrompt: null, rawSettings: {} },
+            warnings: [],
+            stream: convertArrayToReadableStream([
+              { type: 'stream-start', warnings: [] },
+              { type: 'response-metadata', id: 'id-0', modelId: 'mock-model-id', timestamp: new Date(0) },
+              { type: 'tool-call', toolCallId: 'sub-call-1', toolName, input: JSON.stringify(toolArgs) },
+              {
+                type: 'finish',
+                finishReason: 'tool-calls',
+                usage: { inputTokens: 5, outputTokens: 10, totalTokens: 15 },
+              },
+            ]),
+          };
+        }
+        return {
+          rawCall: { rawPrompt: null, rawSettings: {} },
+          warnings: [],
+          stream: convertArrayToReadableStream([
+            { type: 'stream-start', warnings: [] },
+            { type: 'response-metadata', id: 'id-1', modelId: 'mock-model-id', timestamp: new Date(0) },
+            { type: 'text-start', id: 'text-1' },
+            { type: 'text-delta', id: 'text-1', delta: 'Task completed.' },
+            { type: 'text-end', id: 'text-1' },
+            { type: 'finish', finishReason: 'stop', usage: { inputTokens: 5, outputTokens: 10, totalTokens: 15 } },
+          ]),
+        };
+      },
+    });
+  }
+
+  // Supervisor stream model that delegates to a sub-agent tool once, then stops.
+  function makeSupervisorStreamModel(agentKey: string, prompt: string) {
+    let callCount = 0;
+    return new MockLanguageModelV2({
+      doStream: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return {
+            rawCall: { rawPrompt: null, rawSettings: {} },
+            warnings: [],
+            stream: convertArrayToReadableStream([
+              { type: 'stream-start', warnings: [] },
+              { type: 'response-metadata', id: 'id-0', modelId: 'mock-model-id', timestamp: new Date(0) },
+              {
+                type: 'tool-call',
+                toolCallId: 'call-1',
+                toolName: `agent-${agentKey}`,
+                input: JSON.stringify({ prompt }),
+              },
+              {
+                type: 'finish',
+                finishReason: 'tool-calls',
+                usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 },
+              },
+            ]),
+          };
+        }
+        return {
+          rawCall: { rawPrompt: null, rawSettings: {} },
+          warnings: [],
+          stream: convertArrayToReadableStream([
+            { type: 'stream-start', warnings: [] },
+            { type: 'response-metadata', id: 'id-1', modelId: 'mock-model-id', timestamp: new Date(0) },
+            { type: 'text-start', id: 'text-1' },
+            { type: 'text-delta', id: 'text-1', delta: 'Done' },
+            { type: 'text-end', id: 'text-1' },
+            { type: 'finish', finishReason: 'stop', usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 } },
+          ]),
+        };
+      },
+    });
+  }
+
+  it('should forward the parent abortSignal to a delegated sub-agent (stream)', async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const probe = createTool({
+      id: 'probe',
+      description: 'Records the abortSignal it receives from the execution context.',
+      inputSchema: z.object({}),
+      execute: async (_input: unknown, ctx: any) => {
+        capturedSignal = ctx?.abortSignal;
+        return { ok: true };
+      },
+    });
+
+    const subAgent = new Agent({
+      id: 'abort-child',
+      name: 'abort-child',
+      description: 'Calls the probe tool.',
+      instructions: 'Call the probe tool.',
+      model: makeSubAgentStreamModelWithTool('probe', {}),
+      tools: { probe },
+    });
+
+    const supervisor = new Agent({
+      id: 'abort-supervisor',
+      name: 'abort-supervisor',
+      instructions: 'You orchestrate sub-agents.',
+      model: makeSupervisorStreamModel('abortChild', 'do work'),
+      agents: { abortChild: subAgent },
+      memory: new MockMemory(),
+    });
+
+    const controller = new AbortController();
+    const stream = await supervisor.stream('go', { abortSignal: controller.signal, maxSteps: 5 });
+    for await (const _chunk of stream.fullStream) {
+      // drain
+    }
+
+    // The sub-agent's tool must have received a signal linked to the parent controller.
+    expect(capturedSignal).toBeDefined();
+    expect(capturedSignal!.aborted).toBe(false);
+
+    // Aborting the parent must propagate to the forwarded signal observed by the sub-agent.
+    controller.abort();
+    expect(capturedSignal!.aborted).toBe(true);
+  });
+
+  it('should forward the parent abortSignal to a delegated sub-agent (generate)', async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const probe = createTool({
+      id: 'probe',
+      description: 'Records the abortSignal it receives from the execution context.',
+      inputSchema: z.object({}),
+      execute: async (_input: unknown, ctx: any) => {
+        capturedSignal = ctx?.abortSignal;
+        return { ok: true };
+      },
+    });
+
+    const subAgent = new Agent({
+      id: 'abort-child-gen',
+      name: 'abort-child-gen',
+      description: 'Calls the probe tool.',
+      instructions: 'Call the probe tool.',
+      model: makeSubAgentModelWithTool('probe', {}),
+      tools: { probe },
+    });
+
+    const supervisor = new Agent({
+      id: 'abort-supervisor-gen',
+      name: 'abort-supervisor-gen',
+      instructions: 'You orchestrate sub-agents.',
+      model: makeSupervisorModel('abortChildGen', 'do work'),
+      agents: { abortChildGen: subAgent },
+      memory: new MockMemory(),
+    });
+
+    const controller = new AbortController();
+    await supervisor.generate('go', { abortSignal: controller.signal, maxSteps: 5 });
+
+    expect(capturedSignal).toBeDefined();
+    expect(capturedSignal!.aborted).toBe(false);
+
+    controller.abort();
+    expect(capturedSignal!.aborted).toBe(true);
   });
 });

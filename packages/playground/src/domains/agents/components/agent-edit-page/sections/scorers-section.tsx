@@ -1,17 +1,12 @@
-import {
-  Collapsible,
-  CollapsibleTrigger,
-  CollapsibleContent,
-  MultiCombobox,
-  IconButton,
-  Input,
-  Label,
-  RadioGroup,
-  RadioGroupItem,
-  Textarea,
-  JudgeIcon,
-  Icon,
-} from '@mastra/playground-ui';
+import { Button } from '@mastra/playground-ui/components/Button';
+import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@mastra/playground-ui/components/Collapsible';
+import { Combobox } from '@mastra/playground-ui/components/Combobox';
+import { Input } from '@mastra/playground-ui/components/Input';
+import { Label } from '@mastra/playground-ui/components/Label';
+import { RadioGroup, RadioGroupItem } from '@mastra/playground-ui/components/RadioGroup';
+import { Textarea } from '@mastra/playground-ui/components/Textarea';
+import { Icon } from '@mastra/playground-ui/icons/Icon';
+import { JudgeIcon } from '@mastra/playground-ui/icons/JudgeIcon';
 import { Trash2, ChevronRight } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import type { Control } from 'react-hook-form';
@@ -102,7 +97,8 @@ export function ScorersSection({ control, error, readOnly = false }: ScorersSect
                 <CollapsibleContent>
                   <div className="p-3 border-t border-border1">
                     <div className="flex flex-col gap-2">
-                      <MultiCombobox
+                      <Combobox
+                        multiple
                         options={options}
                         value={selectedIds}
                         onValueChange={handleValueChange}
@@ -111,7 +107,6 @@ export function ScorersSection({ control, error, readOnly = false }: ScorersSect
                         emptyText="No scorers available"
                         disabled={isLoading || readOnly}
                         error={error}
-                        variant="light"
                       />
 
                       {selectedOptions.length > 0 && (
@@ -190,9 +185,9 @@ function ScorerConfigPanel({
           <span className="text-xs font-medium text-neutral6">{scorerName}</span>
         </div>
         {!readOnly && (
-          <IconButton tooltip={`Remove ${scorerName}`} onClick={onRemove} variant="ghost" size="sm">
+          <Button type="button" tooltip={`Remove ${scorerName}`} onClick={onRemove} variant="ghost" size="icon-sm">
             <Trash2 />
-          </IconButton>
+          </Button>
         )}
       </div>
 

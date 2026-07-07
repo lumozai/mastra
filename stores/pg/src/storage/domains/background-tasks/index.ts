@@ -5,11 +5,19 @@ import type {
   TaskListResult,
   UpdateBackgroundTask,
 } from '@mastra/core/background-tasks';
-import type { CreateIndexOptions } from '@mastra/core/storage';
+import type {
+  CreateIndexOptions,
+  TABLE_NAMES,
+  PruneOptions,
+  PruneResult,
+  RetentionTablesDescriptor,
+  TableRetentionPolicy,
+} from '@mastra/core/storage';
 import { BackgroundTasksStorage, TABLE_BACKGROUND_TASKS, TABLE_SCHEMAS } from '@mastra/core/storage';
 import { parseSqlIdentifier } from '@mastra/core/utils';
 import { PgDB, resolvePgConfig, generateTableSQL, generateIndexSQL } from '../../db';
 import type { PgDomainConfig } from '../../db';
+import { runPrune, resolveTargets } from '../../retention';
 
 function getSchemaName(schema?: string) {
   return schema ? `"${schema}"` : '"public"';
@@ -38,6 +46,10 @@ function parseJson(v: unknown): any {
 
 /** Convert a DB row (snake_case) to a BackgroundTask object (camelCase). */
 function rowToTask(row: Record<string, any>): BackgroundTask {
+  const createdAt = row.createdAtZ || row.createdAt;
+  const startedAt = row.startedAtZ || row.startedAt;
+  const suspendedAt = row.suspendedAtZ || row.suspendedAt;
+  const completedAt = row.completedAtZ || row.completedAt;
   return {
     id: row.id,
     status: row.status as BackgroundTaskStatus,
@@ -50,16 +62,14 @@ function rowToTask(row: Record<string, any>): BackgroundTask {
     runId: row.run_id,
     result: parseJson(row.result),
     error: parseJson(row.error),
+    suspendPayload: parseJson(row.suspend_payload),
     retryCount: Number(row.retry_count),
     maxRetries: Number(row.max_retries),
     timeoutMs: Number(row.timeout_ms),
-    createdAt: row.createdAt instanceof Date ? row.createdAt : new Date(row.createdAt),
-    startedAt: row.startedAt ? (row.startedAt instanceof Date ? row.startedAt : new Date(row.startedAt)) : undefined,
-    completedAt: row.completedAt
-      ? row.completedAt instanceof Date
-        ? row.completedAt
-        : new Date(row.completedAt)
-      : undefined,
+    createdAt: createdAt instanceof Date ? createdAt : new Date(createdAt),
+    startedAt: startedAt ? (startedAt instanceof Date ? startedAt : new Date(startedAt)) : undefined,
+    suspendedAt: suspendedAt ? (suspendedAt instanceof Date ? suspendedAt : new Date(suspendedAt)) : undefined,
+    completedAt: completedAt ? (completedAt instanceof Date ? completedAt : new Date(completedAt)) : undefined,
   };
 }
 
@@ -70,6 +80,15 @@ export class BackgroundTasksPG extends BackgroundTasksStorage {
   #indexes?: CreateIndexOptions[];
 
   static readonly MANAGED_TABLES = [TABLE_BACKGROUND_TASKS] as const;
+
+  /**
+   * Completed background tasks accumulate as dead weight. Anchored on the
+   * timezone-aware `completedAtZ` mirror column: NULL (in-flight) rows are
+   * excluded automatically since `completedAtZ < cutoff` is false for NULL.
+   */
+  static override readonly retentionTables: RetentionTablesDescriptor = {
+    backgroundTasks: { table: TABLE_BACKGROUND_TASKS, column: 'completedAtZ', indexed: true },
+  };
 
   constructor(config: PgDomainConfig) {
     super();
@@ -85,8 +104,50 @@ export class BackgroundTasksPG extends BackgroundTasksStorage {
       tableName: TABLE_BACKGROUND_TASKS,
       schema: TABLE_SCHEMAS[TABLE_BACKGROUND_TASKS],
     });
+    // Backfill columns added after the initial schema shipped.
+    await this.#db.alterTable({
+      tableName: TABLE_BACKGROUND_TASKS,
+      schema: TABLE_SCHEMAS[TABLE_BACKGROUND_TASKS],
+      ifNotExists: ['suspend_payload', 'suspendedAt'],
+    });
     await this.createDefaultIndexes();
     await this.createCustomIndexes();
+  }
+
+  /**
+   * Lazily ensures a btree index exists on each configured policy's retention
+   * anchor column so age-based `prune()` deletes stay fast on large tables.
+   * Called from the prune path (not init) so only deployments that configure
+   * retention pay the index's write/disk overhead. Best-effort: failures are
+   * logged and pruning proceeds (correct, just slower).
+   * Created even with `skipDefaultIndexes` — retention is an explicit opt-in,
+   * so its supporting index is not part of the default index set.
+   */
+  private async ensureRetentionIndexes(policies: Record<string, TableRetentionPolicy>): Promise<void> {
+    const prefix = this.#schema !== 'public' ? `${this.#schema}_` : '';
+    for (const [key, entry] of Object.entries(BackgroundTasksPG.retentionTables)) {
+      if (!entry.indexed || !policies[key]) continue;
+      try {
+        await this.#db.ensureIndex({
+          indexName: `${prefix}mastra_${key}_retention_idx`,
+          tableName: entry.table as TABLE_NAMES,
+          column: entry.column,
+        });
+      } catch (error) {
+        this.logger?.warn?.(`Failed to create retention index for ${entry.table}:`, error);
+      }
+    }
+  }
+
+  /** Delete completed tasks older than the `backgroundTasks` policy's `maxAge`, batched. */
+  async prune(policies: Record<string, TableRetentionPolicy>, options?: PruneOptions): Promise<PruneResult[]> {
+    await this.ensureRetentionIndexes(policies);
+    const targets = resolveTargets({
+      policies,
+      descriptor: BackgroundTasksPG.retentionTables,
+      order: ['backgroundTasks'],
+    });
+    return runPrune({ db: this.#db, domain: 'backgroundTasks', targets, options });
   }
 
   static getDefaultIndexDefs(schemaPrefix: string): CreateIndexOptions[] {
@@ -181,12 +242,18 @@ export class BackgroundTasksPG extends BackgroundTasksStorage {
         args: serializeJson(task.args),
         result: serializeJson(task.result),
         error: serializeJson(task.error),
+        suspend_payload: serializeJson(task.suspendPayload),
         retry_count: task.retryCount,
         max_retries: task.maxRetries,
         timeout_ms: task.timeoutMs,
         createdAt: task.createdAt.toISOString(),
+        createdAtZ: task.createdAt.toISOString(),
         startedAt: task.startedAt?.toISOString() ?? null,
+        startedAtZ: task.startedAt?.toISOString() ?? null,
+        suspendedAt: task.suspendedAt?.toISOString() ?? null,
+        suspendedAtZ: task.suspendedAt?.toISOString() ?? null,
         completedAt: task.completedAt?.toISOString() ?? null,
+        completedAtZ: task.completedAt?.toISOString() ?? null,
       },
     });
   }
@@ -208,17 +275,31 @@ export class BackgroundTasksPG extends BackgroundTasksStorage {
       setClauses.push(`"error" = $${paramIdx++}`);
       params.push(serializeJson(update.error));
     }
+    if ('suspendPayload' in update) {
+      setClauses.push(`"suspend_payload" = $${paramIdx++}`);
+      params.push(serializeJson(update.suspendPayload));
+    }
     if ('retryCount' in update) {
       setClauses.push(`"retry_count" = $${paramIdx++}`);
       params.push(update.retryCount);
     }
     if ('startedAt' in update) {
       setClauses.push(`"startedAt" = $${paramIdx++}`);
-      params.push(update.startedAt?.toISOString() ?? null);
+      setClauses.push(`"startedAtZ" = $${paramIdx++}`);
+      const val = update.startedAt?.toISOString() ?? null;
+      params.push(val, val);
+    }
+    if ('suspendedAt' in update) {
+      setClauses.push(`"suspendedAt" = $${paramIdx++}`);
+      setClauses.push(`"suspendedAtZ" = $${paramIdx++}`);
+      const val = update.suspendedAt?.toISOString() ?? null;
+      params.push(val, val);
     }
     if ('completedAt' in update) {
       setClauses.push(`"completedAt" = $${paramIdx++}`);
-      params.push(update.completedAt?.toISOString() ?? null);
+      setClauses.push(`"completedAtZ" = $${paramIdx++}`);
+      const val = update.completedAt?.toISOString() ?? null;
+      params.push(val, val);
     }
 
     if (setClauses.length === 0) return;
@@ -266,13 +347,19 @@ export class BackgroundTasksPG extends BackgroundTasksStorage {
       conditions.push(`"tool_name" = $${paramIdx++}`);
       params.push(filter.toolName);
     }
+    if (filter.toolCallId) {
+      conditions.push(`"tool_call_id" = $${paramIdx++}`);
+      params.push(filter.toolCallId);
+    }
     // Date range filtering
     const dateCol =
       filter.dateFilterBy === 'startedAt'
         ? '"startedAt"'
-        : filter.dateFilterBy === 'completedAt'
-          ? '"completedAt"'
-          : '"createdAt"';
+        : filter.dateFilterBy === 'suspendedAt'
+          ? '"suspendedAt"'
+          : filter.dateFilterBy === 'completedAt'
+            ? '"completedAt"'
+            : '"createdAt"';
     if (filter.fromDate) {
       conditions.push(`${dateCol} >= $${paramIdx++}`);
       params.push(filter.fromDate.toISOString());
@@ -294,9 +381,11 @@ export class BackgroundTasksPG extends BackgroundTasksStorage {
     const orderCol =
       filter.orderBy === 'startedAt'
         ? '"startedAt"'
-        : filter.orderBy === 'completedAt'
-          ? '"completedAt"'
-          : '"createdAt"';
+        : filter.orderBy === 'suspendedAt'
+          ? '"suspendedAt"'
+          : filter.orderBy === 'completedAt'
+            ? '"completedAt"'
+            : '"createdAt"';
     const direction = filter.orderDirection === 'desc' ? 'DESC' : 'ASC';
 
     let sql = `SELECT * FROM ${table} ${where} ORDER BY ${orderCol} ${direction}`;
@@ -335,9 +424,11 @@ export class BackgroundTasksPG extends BackgroundTasksStorage {
     const dateCol =
       filter.dateFilterBy === 'startedAt'
         ? '"startedAt"'
-        : filter.dateFilterBy === 'completedAt'
-          ? '"completedAt"'
-          : '"createdAt"';
+        : filter.dateFilterBy === 'suspendedAt'
+          ? '"suspendedAt"'
+          : filter.dateFilterBy === 'completedAt'
+            ? '"completedAt"'
+            : '"createdAt"';
     if (filter.fromDate) {
       conditions.push(`${dateCol} >= $${paramIdx++}`);
       params.push(filter.fromDate.toISOString());

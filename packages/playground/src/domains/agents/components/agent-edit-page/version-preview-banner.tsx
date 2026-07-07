@@ -1,4 +1,5 @@
-import { Badge, IconButton } from '@mastra/playground-ui';
+import { Badge } from '@mastra/playground-ui/components/Badge';
+import { Button } from '@mastra/playground-ui/components/Button';
 import { X } from 'lucide-react';
 
 interface VersionIndicatorProps {
@@ -10,9 +11,9 @@ export function VersionIndicator({ versionNumber, onClose }: VersionIndicatorPro
   return (
     <div className="flex items-center gap-1.5">
       <Badge variant="info">Viewing v{versionNumber}</Badge>
-      <IconButton variant="ghost" size="sm" onClick={onClose} tooltip="Back to latest version">
+      <Button variant="ghost" size="icon-sm" onClick={onClose} tooltip="Back to latest version">
         <X />
-      </IconButton>
+      </Button>
     </div>
   );
 }

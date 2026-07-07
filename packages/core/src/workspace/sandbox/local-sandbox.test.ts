@@ -8,7 +8,7 @@ import { createSandboxTestSuite } from '../../../../../workspaces/_test-utils/sr
 import { RequestContext } from '../../request-context';
 import type { WorkspaceFilesystem } from '../filesystem/filesystem';
 import { IsolationUnavailableError } from './errors';
-import { LocalSandbox, MARKER_DIR } from './local-sandbox';
+import { LocalSandbox, getMarkerDir } from './local-sandbox';
 import { detectIsolation, isIsolationAvailable, isSeatbeltAvailable, isBwrapAvailable } from './native-sandbox';
 
 describe('LocalSandbox', () => {
@@ -203,6 +203,20 @@ describe('LocalSandbox', () => {
 
       expect(result.success).toBe(false);
       expect(result.exitCode).not.toBe(0);
+    });
+
+    it('should decode UTF-8 characters split across stdout chunks', async () => {
+      if (os.platform() === 'win32') return; // Uses POSIX commands
+      const script = [
+        'const b = Buffer.from([0xf0, 0x9f, 0x99, 0x82]);',
+        'process.stdout.write(b.subarray(0, 2));',
+        'setTimeout(() => process.stdout.write(b.subarray(2)), 10);',
+      ].join('');
+
+      const result = await sandbox.executeCommand('node', ['-e', script]);
+
+      expect(result.success).toBe(true);
+      expect(Buffer.from(result.stdout, 'utf8')).toEqual(Buffer.from([0xf0, 0x9f, 0x99, 0x82]));
     });
 
     it('should use working directory', async () => {
@@ -1028,8 +1042,8 @@ describe('LocalSandbox', () => {
       // Write a matching marker file
       const markerFilename = mountSandbox.mounts.markerFilename(hostPath);
       const configHash = mountSandbox.mounts.computeConfigHash(config);
-      await fs.mkdir(MARKER_DIR, { recursive: true });
-      await fs.writeFile(path.join(MARKER_DIR, markerFilename), `${hostPath}|${configHash}`);
+      await fs.mkdir(getMarkerDir(), { recursive: true });
+      await fs.writeFile(path.join(getMarkerDir(), markerFilename), `${hostPath}|${configHash}`);
 
       try {
         const result = await mountSandbox.mount(makeMockLocalFs(basePath), mountPath);
@@ -1038,7 +1052,7 @@ describe('LocalSandbox', () => {
         const target = await fs.readlink(hostPath);
         expect(target).toBe(basePath);
       } finally {
-        await fs.unlink(path.join(MARKER_DIR, markerFilename)).catch(() => {});
+        await fs.unlink(path.join(getMarkerDir(), markerFilename)).catch(() => {});
         await fs.unlink(hostPath).catch(() => {});
       }
     });
@@ -1097,7 +1111,7 @@ describe('LocalSandbox', () => {
 
       // Read and verify marker file
       const markerFilename = mountSandbox.mounts.markerFilename(hostPath);
-      const markerPath = path.join(MARKER_DIR, markerFilename);
+      const markerPath = path.join(getMarkerDir(), markerFilename);
 
       try {
         const content = await fs.readFile(markerPath, 'utf-8');
@@ -1128,8 +1142,8 @@ describe('LocalSandbox', () => {
       await fs.symlink(oldBasePath, hostPath);
       const markerFilename = mountSandbox.mounts.markerFilename(hostPath);
       const oldHash = mountSandbox.mounts.computeConfigHash(oldConfig);
-      await fs.mkdir(MARKER_DIR, { recursive: true });
-      await fs.writeFile(path.join(MARKER_DIR, markerFilename), `${hostPath}|${oldHash}`);
+      await fs.mkdir(getMarkerDir(), { recursive: true });
+      await fs.writeFile(path.join(getMarkerDir(), markerFilename), `${hostPath}|${oldHash}`);
 
       try {
         const result = await mountSandbox.mount(makeMockLocalFs(newBasePath), mountPath);
@@ -1143,7 +1157,7 @@ describe('LocalSandbox', () => {
         const content = await fs.readFile(path.join(hostPath, 'new.txt'), 'utf-8');
         expect(content).toBe('new content');
       } finally {
-        await fs.unlink(path.join(MARKER_DIR, markerFilename)).catch(() => {});
+        await fs.unlink(path.join(getMarkerDir(), markerFilename)).catch(() => {});
         await fs.unlink(hostPath).catch(() => {});
       }
     });
@@ -1207,16 +1221,75 @@ describe('LocalSandbox', () => {
 
       const source = path.join(mountDir, 'seatbelt-source');
       await fs.mkdir(source, { recursive: true });
+      const resolvedSource = await fs.realpath(source);
 
       const mountPath = '/seatbelt-test';
       await seatbeltSandbox.mount(makeMockLocalFs(source), mountPath);
 
       const info = await seatbeltSandbox.getInfo();
       const isoConfig = info.metadata?.isolationConfig as { readWritePaths?: string[] } | undefined;
-      // Isolation allowlist uses the resolved host path
-      expect(isoConfig?.readWritePaths).toEqual(expect.arrayContaining([path.join(mountDir, 'seatbelt-test')]));
+      // Symlink mount points are stored as canonical paths (realpath) for native sandbox bind rules
+      expect(isoConfig?.readWritePaths).toEqual(expect.arrayContaining([resolvedSource]));
 
       await seatbeltSandbox._destroy();
+    });
+
+    it('should remove mount-owned isolation path from readWritePaths on unmount', async () => {
+      if (os.platform() !== 'darwin') return;
+
+      const seatbeltSandbox = new LocalSandbox({
+        workingDirectory: mountDir,
+        isolation: 'seatbelt',
+      });
+      await seatbeltSandbox._start();
+
+      const source = path.join(mountDir, 'seatbelt-unmount-src');
+      await fs.mkdir(source, { recursive: true });
+      const resolvedSource = await fs.realpath(source);
+
+      await seatbeltSandbox.mount(makeMockLocalFs(source), '/seatbelt-unmount-test');
+
+      let info = await seatbeltSandbox.getInfo();
+      let isoConfig = info.metadata?.isolationConfig as { readWritePaths?: string[] } | undefined;
+      expect(isoConfig?.readWritePaths).toEqual(expect.arrayContaining([resolvedSource]));
+
+      await seatbeltSandbox.unmount('/seatbelt-unmount-test');
+
+      info = await seatbeltSandbox.getInfo();
+      isoConfig = info.metadata?.isolationConfig as { readWritePaths?: string[] } | undefined;
+      expect(isoConfig?.readWritePaths).not.toContain(resolvedSource);
+
+      await seatbeltSandbox._destroy();
+    });
+
+    it('should add resolved symlink target to bwrap readWritePaths (not the symlink path)', async () => {
+      if (os.platform() !== 'linux' || !isBwrapAvailable()) {
+        return;
+      }
+
+      const bwrapMountRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'mastra-bwrap-mount-'));
+      const bwrapSandbox = new LocalSandbox({
+        workingDirectory: bwrapMountRoot,
+        isolation: 'bwrap',
+      });
+
+      try {
+        await bwrapSandbox._start();
+
+        const source = path.join(bwrapMountRoot, 'preset-skills-root');
+        await fs.mkdir(source, { recursive: true });
+        const resolvedSource = await fs.realpath(source);
+
+        await bwrapSandbox.mount(makeMockLocalFs(source), '/default-skills');
+
+        const info = await bwrapSandbox.getInfo();
+        const isoConfig = info.metadata?.isolationConfig as { readWritePaths?: string[] } | undefined;
+        expect(isoConfig?.readWritePaths).toEqual(expect.arrayContaining([resolvedSource]));
+        expect(isoConfig?.readWritePaths).not.toContain(path.join(bwrapMountRoot, 'default-skills'));
+      } finally {
+        await bwrapSandbox._destroy();
+        await fs.rm(bwrapMountRoot, { recursive: true, force: true });
+      }
     });
 
     it('should block mounting over a regular file', async () => {

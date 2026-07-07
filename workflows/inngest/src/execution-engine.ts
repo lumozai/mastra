@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { ActorSignal } from '@mastra/core/auth/ee';
 import type { RequestContext } from '@mastra/core/di';
 import { getErrorFromUnknown } from '@mastra/core/error';
 import type { SerializedError } from '@mastra/core/error';
@@ -350,6 +351,7 @@ export class InngestExecutionEngine extends DefaultExecutionEngine {
         ...options,
         traceId: executionContext.tracingIds?.traceId,
         parentSpanId,
+        tracingPolicy: this.options?.tracingPolicy,
       });
 
       // Return serializable form
@@ -423,6 +425,7 @@ export class InngestExecutionEngine extends DefaultExecutionEngine {
     startedAt: number;
     perStep?: boolean;
     stepSpan?: any;
+    actor?: ActorSignal;
   }): Promise<StepResult<any, any, any, any> | null> {
     // Only handle InngestWorkflow instances
     if (!(params.step instanceof InngestWorkflow)) {
@@ -441,6 +444,7 @@ export class InngestExecutionEngine extends DefaultExecutionEngine {
       startedAt,
       perStep,
       stepSpan,
+      actor,
     } = params;
 
     // Build trace context to propagate to nested workflow
@@ -482,6 +486,7 @@ export class InngestExecutionEngine extends DefaultExecutionEngine {
             outputOptions: { includeState: true },
             perStep,
             tracingOptions: nestedTracingContext,
+            actor,
           },
         })) as any;
         result = invokeResp.result;
@@ -511,6 +516,7 @@ export class InngestExecutionEngine extends DefaultExecutionEngine {
             outputOptions: { includeState: true },
             perStep,
             tracingOptions: nestedTracingContext,
+            actor,
           },
         })) as any;
         result = invokeResp.result;
@@ -525,6 +531,7 @@ export class InngestExecutionEngine extends DefaultExecutionEngine {
             outputOptions: { includeState: true },
             perStep,
             tracingOptions: nestedTracingContext,
+            actor,
           },
         })) as any;
         result = invokeResp.result;

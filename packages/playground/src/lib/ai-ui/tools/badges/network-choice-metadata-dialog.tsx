@@ -1,14 +1,14 @@
+import { Button } from '@mastra/playground-ui/components/Button';
+import { CodeEditor } from '@mastra/playground-ui/components/CodeEditor';
 import {
-  CodeEditor,
-  IconButton,
-  Txt,
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogBody,
-} from '@mastra/playground-ui';
+} from '@mastra/playground-ui/components/Dialog';
+import { Txt } from '@mastra/playground-ui/components/Txt';
 import { Share2 } from 'lucide-react';
 import { useState } from 'react';
 
@@ -68,9 +68,9 @@ export const NetworkChoiceMetadataDialogTrigger = ({
   const [isOpen, setIsOpen] = useState(false);
   return (
     <>
-      <IconButton variant="light" size="md" tooltip="Show selection reason" onClick={() => setIsOpen(s => !s)}>
+      <Button variant="default" size="icon-md" tooltip="Show selection reason" onClick={() => setIsOpen(s => !s)}>
         <Share2 className="text-neutral3 size-5" />
-      </IconButton>
+      </Button>
 
       <NetworkChoiceMetadata
         selectionReason={selectionReason || ''}

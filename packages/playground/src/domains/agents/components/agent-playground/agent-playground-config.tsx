@@ -1,88 +1,35 @@
-import {
-  Badge,
-  HoverPopover,
-  PopoverTrigger,
-  PopoverContent,
-  ScrollArea,
-  Spinner,
-  Txt,
-  Icon,
-  cn,
-} from '@mastra/playground-ui';
-import type { JsonSchema, JsonSchemaProperty } from '@mastra/playground-ui';
-import { Braces, ChevronDown, ChevronRight, Wrench, Cpu, Eye, Pencil } from 'lucide-react';
+import { Badge } from '@mastra/playground-ui/components/Badge';
+import { CopyButton } from '@mastra/playground-ui/components/CopyButton';
+import { HoverPopover, PopoverTrigger, PopoverContent } from '@mastra/playground-ui/components/Popover';
+import { ScrollArea } from '@mastra/playground-ui/components/ScrollArea';
+import { Spinner } from '@mastra/playground-ui/components/Spinner';
+import { Tab, TabContent, TabList, Tabs } from '@mastra/playground-ui/components/Tabs';
+import { Txt } from '@mastra/playground-ui/components/Txt';
+import { Icon } from '@mastra/playground-ui/icons/Icon';
+import { cn } from '@mastra/playground-ui/utils/cn';
+import type { JsonSchema, JsonSchemaProperty } from '@mastra/playground-ui/utils/json-schema';
+import { Braces, Wrench, Cpu, Eye, Pencil } from 'lucide-react';
 import { useState, useMemo } from 'react';
 
 import { useAgentEditFormContext } from '../../context/agent-edit-form-context';
 import { useCompareAgentVersions } from '../../hooks/use-agent-versions';
-import { usePreviewInstructions } from '../../hooks/use-preview-instructions';
 import { InstructionBlocksPage } from '../agent-cms-pages/instruction-blocks-page';
 import { ToolsPage } from '../agent-cms-pages/tools-page';
+import { useStoredPromptBlock } from '@/domains/prompt-blocks';
 
-// ---------------------------------------------------------------------------
-// Collapsible section
-// ---------------------------------------------------------------------------
+type AgentConfigTab = 'variables' | 'instructions' | 'tools';
 
-interface CollapsibleSectionProps {
-  title: string;
-  icon: React.ReactNode;
-  badge?: React.ReactNode;
-  headerAction?: React.ReactNode;
-  defaultOpen?: boolean;
-  compact?: boolean;
-  children: React.ReactNode;
-}
-
-function CollapsibleSection({
-  title,
-  icon,
-  badge,
-  headerAction,
-  defaultOpen = false,
-  compact = false,
-  children,
-}: CollapsibleSectionProps) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
-
+function ConfigTabLabel({ title, icon, badge }: { title: string; icon: React.ReactNode; badge?: React.ReactNode }) {
   return (
-    <div className="border-b border-border1">
-      <div
-        className={cn(
-          'group flex items-center gap-2 px-4 hover:bg-surface3 transition-colors',
-          compact ? 'py-2' : 'py-3',
-          isOpen && 'bg-surface3',
-        )}
-      >
-        <button
-          type="button"
-          className="flex min-w-0 flex-1 items-center gap-2 text-left"
-          aria-expanded={isOpen}
-          onClick={() => setIsOpen(!isOpen)}
-        >
-          <Icon size="sm" className="text-neutral3">
-            {isOpen ? <ChevronDown /> : <ChevronRight />}
-          </Icon>
-          <Icon size="sm" className="text-neutral3">
-            {icon}
-          </Icon>
-          <Txt
-            as="span"
-            variant="ui-sm"
-            className={cn(
-              'font-normal text-neutral3 transition-colors group-hover:text-neutral5',
-              isOpen && 'text-neutral5',
-            )}
-          >
-            {title}
-          </Txt>
-        </button>
-        <span className="ml-auto flex items-center gap-2">
-          {headerAction}
-          {badge}
-        </span>
-      </div>
-      {isOpen && <div className="px-4 pb-4">{children}</div>}
-    </div>
+    <>
+      <Icon size="sm" className="text-inherit">
+        {icon}
+      </Icon>
+      <Txt as="span" variant="ui-sm" className="text-inherit">
+        {title}
+      </Txt>
+      {badge}
+    </>
   );
 }
 
@@ -163,94 +110,241 @@ function computeLineDiff(oldText: string, newText: string): DiffLine[] {
 // Diff-aware read-only views
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Per-block content helpers (raw template text, not resolved)
+// ---------------------------------------------------------------------------
+
+function getRawBlockContent(block: Record<string, unknown>): string | null {
+  if (block.type === 'prompt_block' && typeof block.content === 'string') {
+    return block.content;
+  }
+  return null;
+}
+
+function RefBlockCopyContent({ promptBlockId }: { promptBlockId: string }) {
+  const { data: promptBlock } = useStoredPromptBlock(promptBlockId);
+  const content = promptBlock?.content ?? '';
+  if (!content) return null;
+  return <CopyButton content={content} tooltip="Copy prompt block text" size="sm" />;
+}
+
+function BlockCopyButton({ block }: { block: Record<string, unknown> }) {
+  const rawContent = getRawBlockContent(block);
+  if (rawContent) {
+    return <CopyButton content={rawContent} tooltip="Copy prompt text" size="sm" />;
+  }
+  if (block.type === 'prompt_block_ref' && (typeof block.promptBlockId === 'string' || typeof block.id === 'string')) {
+    return <RefBlockCopyContent promptBlockId={(block.promptBlockId as string) ?? (block.id as string)} />;
+  }
+  return null;
+}
+
 function InstructionsDiffView({ previousBlocks, currentBlocks }: { previousBlocks: unknown; currentBlocks: unknown }) {
   const prevBlocksArr = Array.isArray(previousBlocks) ? previousBlocks : [];
   const currBlocksArr = Array.isArray(currentBlocks) ? currentBlocks : [];
 
-  const {
-    data: prevText,
-    isLoading: isLoadingPrev,
-    isError: isPrevError,
-  } = usePreviewInstructions(prevBlocksArr.length > 0 ? prevBlocksArr : undefined, prevBlocksArr.length > 0);
-  const {
-    data: currText,
-    isLoading: isLoadingCurr,
-    isError: isCurrError,
-  } = usePreviewInstructions(currBlocksArr.length > 0 ? currBlocksArr : undefined, currBlocksArr.length > 0);
+  // Build a map of current blocks by position for per-block comparison
+  const currContentByIdx = currBlocksArr.map((b: Record<string, unknown>) => getRawBlockContent(b) ?? '');
+  const prevContentByIdx = prevBlocksArr.map((b: Record<string, unknown>) => getRawBlockContent(b) ?? '');
 
-  if (isLoadingPrev || isLoadingCurr) {
+  // If only one block on each side, show a simple diff
+  if (prevBlocksArr.length <= 1 && currBlocksArr.length <= 1) {
+    const oldStr = prevContentByIdx[0] ?? '';
+    const newStr = currContentByIdx[0] ?? '';
+    const block = prevBlocksArr[0] as Record<string, unknown> | undefined;
+
+    if (oldStr === newStr) {
+      return (
+        <div className="relative rounded-md border border-border1 bg-surface2 p-3">
+          {block && (
+            <div className="absolute top-2 right-2">
+              <BlockCopyButton block={block} />
+            </div>
+          )}
+          <Txt variant="ui-sm" className="text-neutral4 whitespace-pre-wrap font-mono">
+            {oldStr || '(empty)'}
+          </Txt>
+        </div>
+      );
+    }
+
+    const diffLines = computeLineDiff(oldStr, newStr);
     return (
-      <div className="flex items-center justify-center py-6">
+      <div className="relative rounded-md border border-border1 overflow-hidden font-mono text-sm">
+        {block && (
+          <div className="absolute top-2 right-2 z-10">
+            <BlockCopyButton block={block} />
+          </div>
+        )}
+        {diffLines.map((line, idx) => (
+          <div
+            key={idx}
+            className={cn(
+              'px-3 py-0.5 whitespace-pre-wrap wrap-break-word',
+              line.type === 'removed' && 'bg-red-950/20 text-red-300',
+              line.type === 'added' && 'bg-green-950/20 text-green-300',
+              line.type === 'equal' && 'text-neutral4',
+            )}
+          >
+            <span className="inline-block w-4 shrink-0 text-neutral3/50 select-none mr-2">
+              {line.type === 'removed' ? '−' : line.type === 'added' ? '+' : ' '}
+            </span>
+            {line.text || '\u00A0'}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  // Multiple blocks: show per-block with individual copy buttons
+  const maxLen = Math.max(prevBlocksArr.length, currBlocksArr.length);
+  return (
+    <div className="flex flex-col gap-2">
+      {Array.from({ length: maxLen }, (_, idx) => {
+        const prevBlock = prevBlocksArr[idx] as Record<string, unknown> | undefined;
+        const currBlock = currBlocksArr[idx] as Record<string, unknown> | undefined;
+        const oldStr = prevContentByIdx[idx] ?? '';
+        const newStr = currContentByIdx[idx] ?? '';
+
+        if (!prevBlock && currBlock) {
+          return (
+            <div key={idx} className="rounded-md border border-green-900/30 bg-green-950/10 p-3 font-mono text-sm">
+              <Txt variant="ui-xs" className="text-green-400 mb-1">
+                + Added block
+              </Txt>
+              <Txt variant="ui-sm" className="text-green-300 whitespace-pre-wrap">
+                {newStr}
+              </Txt>
+            </div>
+          );
+        }
+
+        if (prevBlock && !currBlock) {
+          return (
+            <div key={idx} className="relative rounded-md border border-red-900/30 bg-red-950/10 p-3 font-mono text-sm">
+              <div className="absolute top-2 right-2">
+                <BlockCopyButton block={prevBlock} />
+              </div>
+              <Txt variant="ui-xs" className="text-red-400 mb-1">
+                − Removed in latest
+              </Txt>
+              <Txt variant="ui-sm" className="text-red-300 whitespace-pre-wrap">
+                {oldStr}
+              </Txt>
+            </div>
+          );
+        }
+
+        if (oldStr === newStr) {
+          return (
+            <div key={idx} className="relative rounded-md border border-border1 bg-surface2 p-3">
+              {prevBlock && (
+                <div className="absolute top-2 right-2">
+                  <BlockCopyButton block={prevBlock} />
+                </div>
+              )}
+              <Txt variant="ui-sm" className="text-neutral4 whitespace-pre-wrap font-mono">
+                {oldStr || '(empty)'}
+              </Txt>
+            </div>
+          );
+        }
+
+        const diffLines = computeLineDiff(oldStr, newStr);
+        return (
+          <div key={idx} className="relative rounded-md border border-border1 overflow-hidden font-mono text-sm">
+            {prevBlock && (
+              <div className="absolute top-2 right-2 z-10">
+                <BlockCopyButton block={prevBlock} />
+              </div>
+            )}
+            {diffLines.map((line, lidx) => (
+              <div
+                key={lidx}
+                className={cn(
+                  'px-3 py-0.5 whitespace-pre-wrap wrap-break-word',
+                  line.type === 'removed' && 'bg-red-950/20 text-red-300',
+                  line.type === 'added' && 'bg-green-950/20 text-green-300',
+                  line.type === 'equal' && 'text-neutral4',
+                )}
+              >
+                <span className="inline-block w-4 shrink-0 text-neutral3/50 select-none mr-2">
+                  {line.type === 'removed' ? '−' : line.type === 'added' ? '+' : ' '}
+                </span>
+                {line.text || '\u00A0'}
+              </div>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function RefBlockPreview({ promptBlockId }: { promptBlockId: string }) {
+  const { data: promptBlock, isLoading } = useStoredPromptBlock(promptBlockId);
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-4">
         <Spinner className="h-4 w-4" />
       </div>
     );
   }
 
-  if (isPrevError || isCurrError) {
-    return (
-      <Txt variant="ui-sm" className="text-red-400 py-2">
-        Failed to load instruction preview
-      </Txt>
-    );
-  }
-
-  const oldStr = prevText ?? '';
-  const newStr = currText ?? '';
-
-  if (oldStr === newStr) {
-    return (
-      <div className="rounded-md border border-border1 bg-surface2 p-3">
-        <Txt variant="ui-sm" className="text-neutral4 whitespace-pre-wrap font-mono">
-          {oldStr || '(empty)'}
-        </Txt>
-      </div>
-    );
-  }
-
-  const diffLines = computeLineDiff(oldStr, newStr);
-
+  const content = promptBlock?.content ?? '';
   return (
-    <div className="rounded-md border border-border1 overflow-hidden font-mono text-sm">
-      {diffLines.map((line, idx) => (
-        <div
-          key={idx}
-          className={cn(
-            'px-3 py-0.5 whitespace-pre-wrap wrap-break-word',
-            line.type === 'removed' && 'bg-red-950/20 text-red-300',
-            line.type === 'added' && 'bg-green-950/20 text-green-300',
-            line.type === 'equal' && 'text-neutral4',
-          )}
-        >
-          <span className="inline-block w-4 shrink-0 text-neutral3/50 select-none mr-2">
-            {line.type === 'removed' ? '−' : line.type === 'added' ? '+' : ' '}
-          </span>
-          {line.text || '\u00A0'}
+    <div className="relative rounded-md border border-border1 bg-surface2 p-3">
+      {content && (
+        <div className="absolute top-2 right-2">
+          <CopyButton content={content} tooltip="Copy prompt block text" size="sm" />
         </div>
-      ))}
+      )}
+      {promptBlock?.name && (
+        <Txt variant="ui-xs" className="text-neutral3 mb-1 font-medium">
+          {promptBlock.name}
+        </Txt>
+      )}
+      <Txt variant="ui-sm" className="text-neutral4 whitespace-pre-wrap font-mono">
+        {content || '(empty)'}
+      </Txt>
     </div>
   );
 }
 
 function ReadOnlyInstructions({ blocks }: { blocks: unknown }) {
   const blocksArr = Array.isArray(blocks) ? blocks : [];
-  const { data: text, isLoading } = usePreviewInstructions(
-    blocksArr.length > 0 ? blocksArr : undefined,
-    blocksArr.length > 0,
-  );
 
-  if (isLoading) {
+  if (blocksArr.length === 0) {
     return (
-      <div className="flex items-center justify-center py-6">
-        <Spinner className="h-4 w-4" />
-      </div>
+      <Txt variant="ui-sm" className="text-neutral3 py-2">
+        No instruction blocks configured
+      </Txt>
     );
   }
 
   return (
-    <div className="rounded-md border border-border1 bg-surface2 p-3">
-      <Txt variant="ui-sm" className="text-neutral4 whitespace-pre-wrap font-mono">
-        {text || '(empty)'}
-      </Txt>
+    <div className="flex flex-col gap-2">
+      {blocksArr.map((block: Record<string, unknown>, idx: number) => {
+        if (block.type === 'prompt_block_ref') {
+          const refId = (block.promptBlockId as string) ?? (block.id as string);
+          return <RefBlockPreview key={refId ?? idx} promptBlockId={refId} />;
+        }
+
+        const content = typeof block.content === 'string' ? block.content : '';
+        return (
+          <div key={(block.id as string) ?? idx} className="relative rounded-md border border-border1 bg-surface2 p-3">
+            {content && (
+              <div className="absolute top-2 right-2">
+                <CopyButton content={content} tooltip="Copy prompt text" size="sm" />
+              </div>
+            )}
+            <Txt variant="ui-sm" className="text-neutral4 whitespace-pre-wrap font-mono">
+              {content || '(empty)'}
+            </Txt>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -483,13 +577,23 @@ function ReadOnlyConfigWithDiff({
   const toolsDiff = diffMap.get('tools');
   const variablesDiff = diffMap.get('requestContextSchema');
 
-  const instructionsBadge = instructionsDiff ? <Badge variant="warning">modified</Badge> : null;
-  const toolsBadge = toolsDiff ? (
-    <Badge variant="warning">modified</Badge>
-  ) : toolCount > 0 ? (
-    <Badge variant="default">{`${toolCount}`}</Badge>
+  const instructionsBadge = instructionsDiff ? (
+    <Badge variant="warning" size="sm">
+      modified
+    </Badge>
   ) : null;
-  const variablesBadge = variablesDiff ? <Badge variant="warning">modified</Badge> : null;
+  const toolsBadge = toolsDiff ? (
+    <Badge variant="warning" size="sm">
+      modified
+    </Badge>
+  ) : toolCount > 0 ? (
+    <Badge variant="default" size="sm">{`${toolCount}`}</Badge>
+  ) : null;
+  const variablesBadge = variablesDiff ? (
+    <Badge variant="warning" size="sm">
+      modified
+    </Badge>
+  ) : null;
 
   if (isLoadingCompare) {
     return (
@@ -500,30 +604,20 @@ function ReadOnlyConfigWithDiff({
   }
 
   return (
-    <>
-      <CollapsibleSection title="System Prompt" icon={<Cpu />} badge={instructionsBadge}>
-        {instructionsDiff ? (
-          <InstructionsDiffView
-            previousBlocks={instructionsDiff.previousValue}
-            currentBlocks={instructionsDiff.currentValue}
-          />
-        ) : (
-          <ReadOnlyInstructions blocks={instructionBlocks} />
-        )}
-      </CollapsibleSection>
+    <Tabs<AgentConfigTab> defaultTab="variables" className="flex min-h-full flex-col overflow-visible">
+      <TabList variant="pill-ghost" className="shrink-0">
+        <Tab value="variables">
+          <ConfigTabLabel title="Variables" icon={<Braces />} badge={variablesBadge} />
+        </Tab>
+        <Tab value="instructions">
+          <ConfigTabLabel title="System Prompt" icon={<Cpu />} badge={instructionsBadge} />
+        </Tab>
+        <Tab value="tools">
+          <ConfigTabLabel title="Tools" icon={<Wrench />} badge={toolsBadge} />
+        </Tab>
+      </TabList>
 
-      <CollapsibleSection title="Tools" icon={<Wrench />} badge={toolsBadge}>
-        {toolsDiff ? (
-          <ToolsDiffView
-            previousTools={toolsDiff.previousValue as Record<string, unknown> | undefined}
-            currentTools={toolsDiff.currentValue as Record<string, unknown> | undefined}
-          />
-        ) : (
-          <ReadOnlyTools tools={tools as Record<string, unknown> | undefined} />
-        )}
-      </CollapsibleSection>
-
-      <CollapsibleSection title="Variables" icon={<Wrench />} badge={variablesBadge}>
+      <TabContent value="variables" className="px-4 py-4">
         {variablesDiff ? (
           <VariablesDiffView
             previousVars={variablesDiff.previousValue as Record<string, unknown> | undefined}
@@ -532,8 +626,30 @@ function ReadOnlyConfigWithDiff({
         ) : (
           <ReadOnlyVariables variables={variables as Record<string, unknown> | undefined} />
         )}
-      </CollapsibleSection>
-    </>
+      </TabContent>
+
+      <TabContent value="instructions" className="px-4 py-4">
+        {instructionsDiff ? (
+          <InstructionsDiffView
+            previousBlocks={instructionsDiff.previousValue}
+            currentBlocks={instructionsDiff.currentValue}
+          />
+        ) : (
+          <ReadOnlyInstructions blocks={instructionBlocks} />
+        )}
+      </TabContent>
+
+      <TabContent value="tools" className="px-4 py-4">
+        {toolsDiff ? (
+          <ToolsDiffView
+            previousTools={toolsDiff.previousValue as Record<string, unknown> | undefined}
+            currentTools={toolsDiff.currentValue as Record<string, unknown> | undefined}
+          />
+        ) : (
+          <ReadOnlyTools tools={tools as Record<string, unknown> | undefined} />
+        )}
+      </TabContent>
+    </Tabs>
   );
 }
 
@@ -571,9 +687,25 @@ export function AgentPlaygroundConfig({ agentId, selectedVersionId, latestVersio
             latestVersionId={latestVersionId}
           />
         ) : (
-          <>
-            <CollapsibleSection title="Variables" icon={<Braces />} compact>
-              <div className="flex flex-col gap-1 px-4 pt-2 pb-3">
+          <Tabs<AgentConfigTab> defaultTab="variables" className="flex min-h-full flex-col overflow-visible">
+            <TabList variant="pill-ghost" className="shrink-0">
+              <Tab value="variables">
+                <ConfigTabLabel title="Variables" icon={<Braces />} />
+              </Tab>
+              <Tab value="instructions">
+                <ConfigTabLabel title="System Prompt" icon={<Cpu />} />
+              </Tab>
+              <Tab value="tools">
+                <ConfigTabLabel
+                  title="Tools"
+                  icon={<Wrench />}
+                  badge={toolCount > 0 ? <Badge variant="default" size="sm">{`${toolCount}`}</Badge> : undefined}
+                />
+              </Tab>
+            </TabList>
+
+            <TabContent value="variables" className="py-0">
+              <div className="flex flex-col gap-1 px-4 py-4">
                 {variableEntries.length > 0 ? (
                   <div className="flex flex-col">
                     {variableEntries.map(([name, prop]) => (
@@ -587,10 +719,10 @@ export function AgentPlaygroundConfig({ agentId, selectedVersionId, latestVersio
                     : 'No variables defined. Add a requestContextSchema to your agent to define variables.'}
                 </Txt>
               </div>
-            </CollapsibleSection>
+            </TabContent>
 
-            <CollapsibleSection title="System Prompt" icon={<Cpu />}>
-              <div className="flex flex-col gap-3 pt-4 px-4 pb-2">
+            <TabContent value="instructions" className="px-4 py-0 pb-4">
+              <div className="flex flex-col gap-3 pt-4 pb-2">
                 <Txt variant="ui-sm" className="font-normal text-neutral3">
                   Add instruction blocks to your agent. Blocks are combined in order to form the system prompt. You can{' '}
                   <HoverPopover>
@@ -631,16 +763,12 @@ export function AgentPlaygroundConfig({ agentId, selectedVersionId, latestVersio
               ) : (
                 <InstructionBlocksPage />
               )}
-            </CollapsibleSection>
+            </TabContent>
 
-            <CollapsibleSection
-              title="Tools"
-              icon={<Wrench />}
-              badge={toolCount > 0 ? <Badge variant="default">{`${toolCount}`}</Badge> : undefined}
-            >
+            <TabContent value="tools" className="px-4 py-0 pb-4">
               <ToolsPage />
-            </CollapsibleSection>
-          </>
+            </TabContent>
+          </Tabs>
         )}
       </ScrollArea>
     </div>

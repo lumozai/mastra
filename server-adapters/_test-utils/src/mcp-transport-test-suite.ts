@@ -170,14 +170,14 @@ export function createMCPTransportTestSuite(config: MCPTransportTestConfig) {
           },
         },
       });
-    });
+    }, 30000);
 
     afterAll(async () => {
       await mcpClient?.disconnect();
       httpServer?.close();
       await mcpServer1?.close();
       await mcpServer2?.close();
-    });
+    }, 30000);
 
     describe('HTTP Transport (/api/mcp/:serverId/mcp)', () => {
       describe('Error handling (raw HTTP)', () => {
@@ -287,16 +287,20 @@ export function createMCPTransportTestSuite(config: MCPTransportTestConfig) {
             servers: {
               failing: {
                 url: new URL(`http://localhost:${failingPort}/api/mcp/${failingServer.id}/mcp`),
+                // This test asserts the shape of the server's isError envelope
+                // (result.content carries the serialized error), so opt out of the
+                // default throw-on-error behavior and resolve with the raw result.
+                onToolError: 'return',
               },
             },
           });
-        });
+        }, 30000);
 
         afterAll(async () => {
           await failingClient?.disconnect();
           failingHttpServer?.close();
           await failingServer?.close();
-        });
+        }, 30000);
 
         it('should return error when tool execution fails', async () => {
           const tools = await failingClient.listTools();
@@ -353,11 +357,11 @@ export function createMCPTransportTestSuite(config: MCPTransportTestConfig) {
               },
             },
           });
-        });
+        }, 30000);
 
         afterAll(async () => {
           await sseClient?.disconnect();
-        });
+        }, 30000);
 
         it('should list tools via MCPClient over SSE', async () => {
           const tools = await sseClient.listTools();
@@ -428,16 +432,20 @@ export function createMCPTransportTestSuite(config: MCPTransportTestConfig) {
             servers: {
               failing: {
                 url: new URL(`http://localhost:${sseFailingPort}/api/mcp/${sseFailingServer.id}/sse`),
+                // This test asserts the shape of the server's isError envelope
+                // (result.content carries the serialized error), so opt out of the
+                // default throw-on-error behavior and resolve with the raw result.
+                onToolError: 'return',
               },
             },
           });
-        });
+        }, 30000);
 
         afterAll(async () => {
           await sseFailingClient?.disconnect();
           sseFailingHttpServer?.close();
           await sseFailingServer?.close();
-        });
+        }, 30000);
 
         it('should return error when tool execution fails over SSE', async () => {
           const tools = await sseFailingClient.listTools();

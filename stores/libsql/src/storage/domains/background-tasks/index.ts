@@ -7,9 +7,11 @@ import type {
   UpdateBackgroundTask,
 } from '@mastra/core/background-tasks';
 import { BackgroundTasksStorage, TABLE_BACKGROUND_TASKS, TABLE_SCHEMAS } from '@mastra/core/storage';
+import type { PruneOptions, PruneResult, RetentionTablesDescriptor, TableRetentionPolicy } from '@mastra/core/storage';
 import { LibSQLDB, resolveClient } from '../../db';
 import type { LibSQLDomainConfig } from '../../db';
 import { buildSelectColumns } from '../../db/utils';
+import { runPrune, resolveTargets } from '../../retention';
 
 function serializeJson(v: unknown): any {
   if (typeof v === 'object' && v != null) return JSON.stringify(v);
@@ -41,16 +43,27 @@ function rowToTask(row: Record<string, any>): BackgroundTask {
     runId: String(row.run_id),
     result: parseJson(row.result),
     error: parseJson(row.error),
+    suspendPayload: parseJson(row.suspend_payload),
     retryCount: Number(row.retry_count),
     maxRetries: Number(row.max_retries),
     timeoutMs: Number(row.timeout_ms),
     createdAt: new Date(String(row.createdAt)),
     startedAt: row.startedAt ? new Date(String(row.startedAt)) : undefined,
+    suspendedAt: row.suspendedAt ? new Date(String(row.suspendedAt)) : undefined,
     completedAt: row.completedAt ? new Date(String(row.completedAt)) : undefined,
   };
 }
 
 export class BackgroundTasksLibSQL extends BackgroundTasksStorage {
+  /**
+   * Completed/failed task records accumulate. Anchored on `completedAt`, which
+   * is NULL while a task is in-flight (pending/running/suspended) — so `completedAt
+   * < cutoff` never prunes a live task, no explicit status filter needed.
+   */
+  static override readonly retentionTables: RetentionTablesDescriptor = {
+    backgroundTasks: { table: TABLE_BACKGROUND_TASKS, column: 'completedAt', indexed: true },
+  };
+
   #db: LibSQLDB;
   #client: Client;
 
@@ -66,10 +79,26 @@ export class BackgroundTasksLibSQL extends BackgroundTasksStorage {
       tableName: TABLE_BACKGROUND_TASKS,
       schema: TABLE_SCHEMAS[TABLE_BACKGROUND_TASKS],
     });
+    // Backfill columns added after the initial schema shipped.
+    await this.#db.alterTable({
+      tableName: TABLE_BACKGROUND_TASKS,
+      schema: TABLE_SCHEMAS[TABLE_BACKGROUND_TASKS],
+      ifNotExists: ['suspend_payload', 'suspendedAt'],
+    });
   }
 
   async dangerouslyClearAll(): Promise<void> {
     await this.#db.deleteData({ tableName: TABLE_BACKGROUND_TASKS });
+  }
+
+  /** Delete completed tasks older than the `backgroundTasks` policy's `maxAge`, batched. */
+  async prune(policies: Record<string, TableRetentionPolicy>, options?: PruneOptions): Promise<PruneResult[]> {
+    const targets = resolveTargets({
+      policies,
+      descriptor: BackgroundTasksLibSQL.retentionTables,
+      order: ['backgroundTasks'],
+    });
+    return runPrune({ db: this.#db, domain: 'backgroundTasks', targets, options, logger: this.logger });
   }
 
   async createTask(task: BackgroundTask): Promise<void> {
@@ -88,11 +117,13 @@ export class BackgroundTasksLibSQL extends BackgroundTasksStorage {
         args: task.args,
         result: task.result ?? null,
         error: task.error ?? null,
+        suspend_payload: task.suspendPayload ?? null,
         retry_count: task.retryCount,
         max_retries: task.maxRetries,
         timeout_ms: task.timeoutMs,
         createdAt: task.createdAt.toISOString(),
         startedAt: task.startedAt?.toISOString() ?? null,
+        suspendedAt: task.suspendedAt?.toISOString() ?? null,
         completedAt: task.completedAt?.toISOString() ?? null,
       },
     });
@@ -114,6 +145,10 @@ export class BackgroundTasksLibSQL extends BackgroundTasksStorage {
       setClauses.push('error = jsonb(?)');
       params.push(serializeJson(update.error));
     }
+    if ('suspendPayload' in update) {
+      setClauses.push('suspend_payload = jsonb(?)');
+      params.push(serializeJson(update.suspendPayload));
+    }
     if ('retryCount' in update) {
       setClauses.push('retry_count = ?');
       params.push(update.retryCount as number);
@@ -121,6 +156,10 @@ export class BackgroundTasksLibSQL extends BackgroundTasksStorage {
     if ('startedAt' in update) {
       setClauses.push('startedAt = ?');
       params.push(update.startedAt?.toISOString() ?? null);
+    }
+    if ('suspendedAt' in update) {
+      setClauses.push('suspendedAt = ?');
+      params.push(update.suspendedAt?.toISOString() ?? null);
     }
     if ('completedAt' in update) {
       setClauses.push('completedAt = ?');
@@ -174,13 +213,19 @@ export class BackgroundTasksLibSQL extends BackgroundTasksStorage {
       conditions.push('tool_name = ?');
       params.push(filter.toolName);
     }
+    if (filter.toolCallId) {
+      conditions.push('tool_call_id = ?');
+      params.push(filter.toolCallId);
+    }
     // Date range filtering
     const dateCol =
       filter.dateFilterBy === 'startedAt'
         ? 'startedAt'
-        : filter.dateFilterBy === 'completedAt'
-          ? 'completedAt'
-          : 'createdAt';
+        : filter.dateFilterBy === 'suspendedAt'
+          ? 'suspendedAt'
+          : filter.dateFilterBy === 'completedAt'
+            ? 'completedAt'
+            : 'createdAt';
     if (filter.fromDate) {
       conditions.push(`${dateCol} >= ?`);
       params.push(filter.fromDate.toISOString());
@@ -200,7 +245,13 @@ export class BackgroundTasksLibSQL extends BackgroundTasksStorage {
     const total = Number(countResult.rows[0]?.count ?? 0);
 
     const orderCol =
-      filter.orderBy === 'startedAt' ? 'startedAt' : filter.orderBy === 'completedAt' ? 'completedAt' : 'createdAt';
+      filter.orderBy === 'startedAt'
+        ? 'startedAt'
+        : filter.orderBy === 'suspendedAt'
+          ? 'suspendedAt'
+          : filter.orderBy === 'completedAt'
+            ? 'completedAt'
+            : 'createdAt';
     const direction = filter.orderDirection === 'desc' ? 'DESC' : 'ASC';
 
     let sql = `SELECT ${buildSelectColumns(TABLE_BACKGROUND_TASKS)} FROM ${TABLE_BACKGROUND_TASKS} ${where} ORDER BY ${orderCol} ${direction}`;
@@ -238,9 +289,11 @@ export class BackgroundTasksLibSQL extends BackgroundTasksStorage {
     const dateCol =
       filter.dateFilterBy === 'startedAt'
         ? 'startedAt'
-        : filter.dateFilterBy === 'completedAt'
-          ? 'completedAt'
-          : 'createdAt';
+        : filter.dateFilterBy === 'suspendedAt'
+          ? 'suspendedAt'
+          : filter.dateFilterBy === 'completedAt'
+            ? 'completedAt'
+            : 'createdAt';
     if (filter.fromDate) {
       conditions.push(`${dateCol} >= ?`);
       params.push(filter.fromDate.toISOString());

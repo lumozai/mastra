@@ -1,17 +1,17 @@
+import { Button } from '@mastra/playground-ui/components/Button';
 import {
-  Button,
-  Input,
-  MarkdownRenderer,
-  ScrollArea,
-  SkillIcon,
-  cn,
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogDescription,
   DialogBody,
-} from '@mastra/playground-ui';
+} from '@mastra/playground-ui/components/Dialog';
+import { Input } from '@mastra/playground-ui/components/Input';
+import { MarkdownRenderer } from '@mastra/playground-ui/components/MarkdownRenderer';
+import { ScrollArea } from '@mastra/playground-ui/components/ScrollArea';
+import { SkillIcon } from '@mastra/playground-ui/icons/SkillIcon';
+import { cn } from '@mastra/playground-ui/utils/cn';
 import { Search, Download, ExternalLink, Loader2, Package, Github, Check, Folder } from 'lucide-react';
 import { useState, useCallback, useMemo } from 'react';
 import { useDebouncedCallback } from 'use-debounce';
@@ -385,7 +385,7 @@ export function AddSkillDialog({
                     const mount = writableMounts.find(m => skillPath.startsWith(m.path + '/') || skillPath === m.path);
                     return mount ? <span className="text-xs text-icon4">Installed at {mount.path}</span> : null;
                   })()}
-                <Button variant="light" onClick={() => handleOpenChange(false)}>
+                <Button variant="default" onClick={() => handleOpenChange(false)}>
                   Cancel
                 </Button>
                 <Button

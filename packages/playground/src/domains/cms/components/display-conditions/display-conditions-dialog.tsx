@@ -1,8 +1,5 @@
-import type { JsonSchema, RuleGroup } from '@mastra/playground-ui';
+import { Button } from '@mastra/playground-ui/components/Button';
 import {
-  IconButton,
-  RuleBuilder,
-  countLeafRules,
   Dialog,
   DialogTrigger,
   DialogContent,
@@ -10,7 +7,11 @@ import {
   DialogBody,
   DialogTitle,
   DialogDescription,
-} from '@mastra/playground-ui';
+} from '@mastra/playground-ui/components/Dialog';
+import { RuleBuilder } from '@mastra/playground-ui/components/RuleBuilder';
+import type { JsonSchema } from '@mastra/playground-ui/utils/json-schema';
+import type { RuleGroup } from '@mastra/playground-ui/utils/rule-engine';
+import { countLeafRules } from '@mastra/playground-ui/utils/rule-engine';
 import { Ruler } from 'lucide-react';
 
 interface DisplayConditionsDialogProps {
@@ -32,15 +33,15 @@ export function DisplayConditionsDialog({ entityName, schema, rules, onRulesChan
   return (
     <Dialog>
       <DialogTrigger asChild>
-        <IconButton
+        <Button
           tooltip={ruleCount > 0 ? `${ruleCount} rules` : 'Display Conditions'}
-          size="sm"
+          size="icon-sm"
           variant="ghost"
           className="relative"
         >
           <Ruler className="text-accent6" />
           {ruleCount > 0 && <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-accent1" />}
-        </IconButton>
+        </Button>
       </DialogTrigger>
       <DialogContent className="max-w-5xl w-full">
         <DialogHeader>

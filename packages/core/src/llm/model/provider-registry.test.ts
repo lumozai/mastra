@@ -6,7 +6,69 @@ import type { ProviderConfig } from './gateways/base.js';
 import { MastraGateway } from './gateways/mastra.js';
 import { ModelsDevGateway } from './gateways/models-dev.js';
 import { NetlifyGateway } from './gateways/netlify.js';
-import { GatewayRegistry } from './provider-registry.js';
+import {
+  GatewayRegistry,
+  modelSupportsAttachments,
+  modelSupportsTemperature,
+  _resetCapabilityCaches,
+} from './provider-registry.js';
+
+describe('modelSupportsAttachments', () => {
+  afterEach(() => {
+    _resetCapabilityCaches();
+    vi.restoreAllMocks();
+  });
+
+  it('falls back to checked-in source capabilities when dist capability files are absent', async () => {
+    const originalExistsSync = fs.existsSync;
+    const packageRoot = process.cwd();
+    const distCapabilitiesDir = path.join(packageRoot, 'dist', 'capabilities');
+    const distOpenRouterCapabilities = path.join(distCapabilitiesDir, 'openrouter.json');
+
+    vi.spyOn(fs, 'existsSync').mockImplementation(filePath => {
+      if (typeof filePath !== 'string') return originalExistsSync(filePath);
+      const normalizedPath = path.normalize(filePath);
+      if (normalizedPath === path.normalize(distCapabilitiesDir)) return true;
+      if (normalizedPath === path.normalize(distOpenRouterCapabilities)) return false;
+      return originalExistsSync(filePath);
+    });
+
+    expect(modelSupportsAttachments('openrouter/deepseek-v4-flash')).toBe(false);
+    expect(modelSupportsAttachments('openrouter/deepseek/deepseek-v4-flash')).toBe(false);
+    expect(modelSupportsAttachments('mastra/openrouter/deepseek/deepseek-v4-flash')).toBe(false);
+    expect(modelSupportsAttachments('openrouter/openai/gpt-4o')).toBe(true);
+    expect(modelSupportsAttachments('mastra/openrouter/openai/gpt-4o')).toBe(true);
+  });
+});
+
+describe('modelSupportsTemperature', () => {
+  beforeEach(() => {
+    _resetCapabilityCaches();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns true for models listed in the temperature capability', () => {
+    expect(modelSupportsTemperature('openai/gpt-4o')).toBe(true);
+    expect(modelSupportsTemperature('anthropic/claude-sonnet-4-6')).toBe(true);
+  });
+
+  it('returns false for models whose provider is known but model is not in temperature list', () => {
+    // gpt-5-pro is in the openai attachment list but NOT in the temperature list
+    expect(modelSupportsTemperature('openai/gpt-5-pro')).toBe(false);
+  });
+
+  it('returns undefined for unknown providers', () => {
+    expect(modelSupportsTemperature('unknown-provider/some-model')).toBeUndefined();
+  });
+
+  it('resolves nested provider model IDs through the fallback path', () => {
+    // openrouter/anthropic/claude-sonnet-4-6 should resolve via the nested provider fallback
+    expect(modelSupportsTemperature('openrouter/anthropic/claude-sonnet-4-6')).toBe(true);
+    expect(modelSupportsTemperature('openrouter/openai/gpt-5-pro')).toBe(false);
+  });
+});
 
 describe('GatewayRegistry Auto-Refresh', () => {
   const CACHE_DIR = path.join(os.homedir(), '.cache', 'mastra');
@@ -773,7 +835,7 @@ describe('Corrupted JSON recovery', () => {
     originalRmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('should delete corrupted JSON file and log warning', async () => {
+  it('should delete corrupted JSON file silently without logging', async () => {
     const tempDir = path.join(os.tmpdir(), `mastra-corrupted-json-delete-test-${Date.now()}`);
     const distDir = path.join(tempDir, 'dist');
     originalMkdirSync(distDir, { recursive: true });
@@ -823,6 +885,10 @@ describe('Corrupted JSON recovery', () => {
     } catch {
       // May throw if static registry also has issues in test environment
     }
+
+    // The corruption is auto-recoverable (next gateway sync rewrites the file),
+    // so we should not log a warning that worries users.
+    expect(warnSpy).not.toHaveBeenCalled();
 
     // Clean up mocks
     readFileSyncSpy.mockRestore();
@@ -881,6 +947,92 @@ describe('Corrupted JSON recovery', () => {
     expect(validationRegex.test(corruptedDtsContent)).toBe(true);
     expect(validationRegex.test(validDtsContent)).toBe(false);
     expect(validationRegex.test(nothingToQuote)).toBe(false);
+  });
+});
+
+describe('Partial gateway sync should not corrupt registry', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    // @ts-expect-error - accessing private property for testing
+    GatewayRegistry['instance'] = undefined;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('should not write partial results to disk when a gateway fetch fails', async () => {
+    const registry = GatewayRegistry.getInstance({ useDynamicLoading: true });
+
+    // Mock ModelsDevGateway.fetchProviders to fail (simulating models.dev API being down)
+    vi.spyOn(ModelsDevGateway.prototype, 'fetchProviders').mockRejectedValue(
+      new Error('Failed to fetch from models.dev: Service Unavailable'),
+    );
+
+    // Mock NetlifyGateway.fetchProviders to succeed (only Netlify returns data)
+    vi.spyOn(NetlifyGateway.prototype, 'fetchProviders').mockResolvedValue({
+      netlify: {
+        name: 'Netlify',
+        url: 'https://netlify.example.com',
+        apiKeyEnvVar: 'NETLIFY_API_KEY',
+        models: ['netlify-model-1'],
+        gateway: 'netlify',
+      },
+    } as Record<string, ProviderConfig>);
+
+    // Track files that would be written via atomic rename
+    const renamedFiles: { src: string; dest: string }[] = [];
+    vi.spyOn(fs.promises, 'writeFile').mockResolvedValue();
+    vi.spyOn(fs.promises, 'rename').mockImplementation(async (src: any, dest: any) => {
+      renamedFiles.push({ src: src.toString(), dest: dest.toString() });
+    });
+
+    await registry.syncGateways(true);
+
+    // No registry files should have been written since models.dev failed
+    const registryWrites = renamedFiles.filter(
+      f => f.dest.includes('provider-registry.json') || f.dest.includes('provider-types.generated'),
+    );
+    expect(registryWrites).toHaveLength(0);
+  });
+
+  it('should write results when all gateways succeed', async () => {
+    const registry = GatewayRegistry.getInstance({ useDynamicLoading: true });
+
+    // Mock both gateways to succeed
+    vi.spyOn(ModelsDevGateway.prototype, 'fetchProviders').mockResolvedValue({
+      openai: {
+        name: 'OpenAI',
+        url: 'https://api.openai.com/v1',
+        apiKeyEnvVar: 'OPENAI_API_KEY',
+        models: ['gpt-4o'],
+        gateway: 'models.dev',
+      },
+    } as Record<string, ProviderConfig>);
+
+    vi.spyOn(NetlifyGateway.prototype, 'fetchProviders').mockResolvedValue({
+      netlify: {
+        name: 'Netlify',
+        url: 'https://netlify.example.com',
+        apiKeyEnvVar: 'NETLIFY_API_KEY',
+        models: ['netlify-model-1'],
+        gateway: 'netlify',
+      },
+    } as Record<string, ProviderConfig>);
+
+    const renamedFiles: { src: string; dest: string }[] = [];
+    vi.spyOn(fs.promises, 'writeFile').mockResolvedValue();
+    vi.spyOn(fs.promises, 'rename').mockImplementation(async (src: any, dest: any) => {
+      renamedFiles.push({ src: src.toString(), dest: dest.toString() });
+    });
+
+    await registry.syncGateways(true);
+
+    // Registry files SHOULD be written since all gateways succeeded
+    const registryWrites = renamedFiles.filter(
+      f => f.dest.includes('provider-registry.json') || f.dest.includes('provider-types.generated'),
+    );
+    expect(registryWrites.length).toBeGreaterThan(0);
   });
 });
 

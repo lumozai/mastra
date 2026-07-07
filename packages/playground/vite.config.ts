@@ -18,8 +18,14 @@ const studioStandalonePlugin = (targetPort: string, targetHost: string): PluginO
       .replace(/%%MASTRA_STUDIO_BASE_PATH%%/g, '')
       .replace(/%%MASTRA_SERVER_PROTOCOL%%/g, 'http')
       .replace(/%%MASTRA_CLOUD_API_ENDPOINT%%/g, '')
+      .replace(/%%MASTRA_AUTO_DETECT_URL%%/g, 'true')
       .replace(/%%MASTRA_EXPERIMENTAL_FEATURES%%/g, process.env.EXPERIMENTAL_FEATURES || 'false')
-      .replace(/%%MASTRA_EXPERIMENTAL_UI%%/g, process.env.MASTRA_EXPERIMENTAL_UI || 'false');
+      .replace(/%%MASTRA_EXPERIMENTAL_UI%%/g, process.env.MASTRA_EXPERIMENTAL_UI || 'false')
+      .replace(/%%MASTRA_AGENT_SIGNALS%%/g, process.env.MASTRA_AGENT_SIGNALS ?? 'true')
+      .replace(/%%MASTRA_SIGNALS_UI%%/g, process.env.MASTRA_SIGNALS_UI || 'false')
+      .replace(/%%MASTRA_ORGANIZATION_ID%%/g, process.env.MASTRA_ORGANIZATION_ID || '')
+      .replace(/%%MASTRA_PLATFORM_PROJECT_ID%%/g, process.env.MASTRA_PLATFORM_PROJECT_ID || '')
+      .replace(/%%MASTRA_PLATFORM_OBSERVABILITY_ENDPOINT%%/g, process.env.MASTRA_PLATFORM_OBSERVABILITY_ENDPOINT || '');
   },
 });
 
@@ -214,6 +220,7 @@ export default defineConfig(({ mode }) => {
     plugins: [stubNodeBuiltinsPlugin, tailwindcss(), react(), routesManifestPlugin()],
     base: './',
     resolve: {
+      dedupe: ['react', 'react-dom', 'react/jsx-runtime', 'react-resizable-panels', '@tanstack/react-query'],
       alias: {
         '@': path.resolve(__dirname, './src'),
         '@internal-temp': path.resolve(__dirname, './src/vendor/@mastra'),
@@ -249,6 +256,12 @@ export default defineConfig(({ mode }) => {
         ...commonConfig.server,
         proxy: {
           '/api': {
+            target: `http://${targetHost}:${targetPort}`,
+            changeOrigin: true,
+          },
+          // Custom server routes (e.g. @mastra/livekit's connection-details endpoint)
+          // mount at the server root, outside the /api prefix, so forward them too.
+          '/voice': {
             target: `http://${targetHost}:${targetPort}`,
             changeOrigin: true,
           },

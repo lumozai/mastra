@@ -8,6 +8,7 @@ import type {
   MCPServersStorage,
   WorkspacesStorage,
   SkillsStorage,
+  FavoritesStorage,
   ScoresStorage,
   WorkflowsStorage,
   MemoryStorage,
@@ -16,13 +17,23 @@ import type {
   DatasetsStorage,
   ExperimentsStorage,
   BackgroundTasksStorage,
+  SchedulesStorage,
+  ChannelsStorage,
+  HarnessStorage,
+  ToolProviderConnectionsStorage,
+  NotificationsStorage,
+  ThreadStateStorage,
 } from './domains';
+import { InMemoryThreadStateStorage } from './domains/thread-state/inmemory';
+import type { PruneOptions, PruneResult, RetentionConfig, TableRetentionPolicy } from './retention';
 
 /** Map of all storage domain interfaces available in a composite store. */
 export type StorageDomains = {
   workflows?: WorkflowsStorage;
   scores?: ScoresStorage;
   memory?: MemoryStorage;
+  channels?: ChannelsStorage;
+  notifications?: NotificationsStorage;
   observability?: ObservabilityStorage;
   agents?: AgentsStorage;
   datasets?: DatasetsStorage;
@@ -33,8 +44,13 @@ export type StorageDomains = {
   mcpServers?: MCPServersStorage;
   workspaces?: WorkspacesStorage;
   skills?: SkillsStorage;
+  favorites?: FavoritesStorage;
   blobs?: BlobStore;
   backgroundTasks?: BackgroundTasksStorage;
+  schedules?: SchedulesStorage;
+  harness?: HarnessStorage;
+  toolProviderConnections?: ToolProviderConnectionsStorage;
+  threadState?: ThreadStateStorage;
 };
 
 /**
@@ -50,6 +66,8 @@ export const EDITOR_DOMAINS = [
   'mcpServers',
   'workspaces',
   'skills',
+  'favorites',
+  'toolProviderConnections',
 ] as const satisfies ReadonlyArray<keyof StorageDomains>;
 
 /**
@@ -180,6 +198,28 @@ export interface MastraCompositeStoreConfig {
    * // No auto-init, tables must already exist
    */
   disableInit?: boolean;
+
+  /**
+   * Opt-in, table-granular, age-based retention policies.
+   *
+   * Declare per-domain, per-table `maxAge` policies; call `storage.prune()`
+   * to delete rows older than their configured age. Anything left unset is
+   * kept forever (no behavior change by default).
+   *
+   * @example
+   * ```typescript
+   * retention: {
+   *   memory: {
+   *     messages: { maxAge: '30d' },
+   *     threads: { maxAge: '90d' },
+   *   },
+   *   observability: {
+   *     spans: { maxAge: '7d' },
+   *   },
+   * }
+   * ```
+   */
+  retention?: RetentionConfig;
 }
 
 /**
@@ -218,17 +258,54 @@ export interface MastraCompositeStoreConfig {
  * await memory?.saveThread({ thread });
  * ```
  */
+/**
+ * Minimal interface a storage adapter sees from the Mastra instance.
+ * Kept narrow on purpose to avoid pulling the full Mastra type into the
+ * storage layer (which would create a circular import).
+ */
+export interface StorageMastraRef {
+  getAgentById?: (id: string) => { source?: string; __getEditorConfig?: () => unknown } | undefined;
+  listAgents?: () => Record<string, { id: string; source?: string; __getEditorConfig?: () => unknown }> | undefined;
+  getEditor?: () => { getSource?: () => 'code' | 'db' | undefined } | undefined;
+}
+
+/** A domain that implements the age-based retention `prune()` contract. */
+interface PruneCapable {
+  prune(policies: Record<string, TableRetentionPolicy>, options?: PruneOptions): Promise<PruneResult[]>;
+}
+
+function isPruneCapable(value: unknown): value is PruneCapable {
+  return typeof value === 'object' && value !== null && typeof (value as PruneCapable).prune === 'function';
+}
+
 export class MastraCompositeStore extends MastraBase {
   protected hasInitialized: null | Promise<boolean> = null;
   protected shouldCacheInit = true;
 
   id: string;
   stores?: StorageDomains;
+  protected mastra?: StorageMastraRef;
 
   /**
    * When true, automatic initialization (table creation/migrations) is disabled.
    */
   disableInit: boolean = false;
+
+  /**
+   * Opt-in, table-granular, age-based retention policies. Consumed by
+   * `prune()`. Undefined means nothing is pruned (keep forever).
+   */
+  protected retention?: RetentionConfig;
+
+  /**
+   * Retained references to the parent stores supplied via composition. `init()`
+   * delegates to these so the parent's own `init()` logic (pragmas, ordered
+   * DDL, init coalescing, etc.) runs instead of being bypassed by the
+   * composite iterating the inner domains in parallel — which was the cause
+   * of the SQLITE_BUSY / "no such table" races reported in issue #16782.
+   */
+  protected parentDefault?: MastraCompositeStore;
+  protected parentEditor?: MastraCompositeStore;
 
   constructor(config: MastraCompositeStoreConfig) {
     const name = config.name ?? 'MastraCompositeStore';
@@ -244,12 +321,18 @@ export class MastraCompositeStore extends MastraBase {
 
     this.id = config.id;
     this.disableInit = config.disableInit ?? false;
+    this.retention = config.retention;
 
     // If composition config is provided (default, editor, or domains), compose the stores
     if (config.default || config.editor || config.domains) {
       const defaultStores = config.default?.stores;
       const editorStores = config.editor?.stores;
       const domainOverrides = config.domains ?? {};
+
+      // Retain the parent store refs so init() can delegate to their own
+      // init() — see field doc above and init() below.
+      this.parentDefault = config.default;
+      this.parentEditor = config.editor;
 
       // Validate that at least one storage source is provided
       const hasDefaultDomains = defaultStores && Object.values(defaultStores).some(v => v !== undefined);
@@ -286,11 +369,49 @@ export class MastraCompositeStore extends MastraBase {
         mcpServers: resolve('mcpServers'),
         workspaces: resolve('workspaces'),
         skills: resolve('skills'),
+        favorites: resolve('favorites'),
         blobs: resolve('blobs'),
         backgroundTasks: resolve('backgroundTasks'),
+        schedules: resolve('schedules'),
+        channels: resolve('channels'),
+        harness: resolve('harness'),
+        toolProviderConnections: resolve('toolProviderConnections'),
+        notifications: resolve('notifications'),
+        // The thread-state domain always has an in-memory store wired by default
+        // so the built-in task tools work out of the box without a configured
+        // backend. Configure a durable backend for state that must survive a
+        // process restart.
+        threadState: resolve('threadState') ?? new InMemoryThreadStateStorage(),
       } as StorageDomains;
     }
     // Otherwise, subclasses set stores themselves
+  }
+
+  /**
+   * Register the Mastra instance with this storage adapter and cascade the
+   * reference to all owned domain stores and parent composites. Storage
+   * adapters that need to look up agents, editor config, etc. can read
+   * `this.mastra` after this is called.
+   * @internal
+   */
+  __registerMastra(mastra: StorageMastraRef, seen: Set<unknown> = new Set<unknown>()): void {
+    if (seen.has(this)) return;
+    seen.add(this);
+    this.mastra = mastra;
+    const cascade = (target: unknown) => {
+      if (!target || typeof target !== 'object' || seen.has(target)) return;
+      const fn = (target as { __registerMastra?: (m: StorageMastraRef, s?: Set<unknown>) => void }).__registerMastra;
+      if (typeof fn === 'function') {
+        fn.call(target, mastra, seen);
+      } else {
+        seen.add(target);
+      }
+    };
+    if (this.parentDefault) cascade(this.parentDefault);
+    if (this.parentEditor) cascade(this.parentEditor);
+    if (this.stores) {
+      for (const domain of Object.values(this.stores)) cascade(domain);
+    }
   }
 
   /**
@@ -312,8 +433,66 @@ export class MastraCompositeStore extends MastraBase {
   }
 
   /**
+   * Delete rows older than their configured `maxAge` across all domains that
+   * have a policy declared in `retention`.
+   *
+   * Prune is safe at scale: each domain deletes in bounded, batched, resumable,
+   * cancellable chunks (see {@link PruneOptions}). It only deletes rows. On
+   * SQLite/LibSQL freed pages are reused by future writes so the file stops
+   * growing; handing disk back to the OS is left to the underlying database and
+   * the operator to manage.
+   *
+   * Returns one {@link PruneResult} per table touched. A result with
+   * `done: false` means eligible rows remain — call `prune()` again (e.g. on
+   * the next cron tick) to continue.
+   *
+   * Prune is meant to run unattended (a cron tick), so a failure in one
+   * domain is logged and skipped rather than rejecting the whole call — the
+   * results already gathered for other domains are still returned, and the
+   * failed domain is retried naturally on the next tick.
+   *
+   * With no `retention` configured this is a no-op returning `[]`.
+   */
+  async prune(options?: PruneOptions): Promise<PruneResult[]> {
+    const retention = this.retention;
+    if (!retention) return [];
+
+    const results: PruneResult[] = [];
+    for (const [domainKey, tablePolicies] of Object.entries(retention) as [
+      keyof StorageDomains,
+      Record<string, TableRetentionPolicy> | undefined,
+    ][]) {
+      if (options?.signal?.aborted) break;
+      if (!tablePolicies || Object.keys(tablePolicies).length === 0) continue;
+
+      const domain = this.stores?.[domainKey];
+      if (!isPruneCapable(domain)) continue; // domain not configured / doesn't support retention
+
+      try {
+        const domainResults = await domain.prune(tablePolicies, options);
+        results.push(...domainResults);
+      } catch (error) {
+        this.logger?.error(`prune() failed for domain "${domainKey}"`, { error });
+      }
+    }
+    return results;
+  }
+
+  /**
    * Initialize all domain stores.
-   * This creates necessary tables, indexes, and performs any required migrations.
+   *
+   * When a parent store was supplied via `default` or `editor`, delegate to
+   * its own `init()` first. Each adapter owns its `init()` contract — it may
+   * apply connection-level setup, run migrations, enforce DDL ordering, or
+   * coalesce concurrent callers. Calling each domain's `init()` directly
+   * against the parent's shared client would bypass all of that and can
+   * corrupt or partially create schema (see issue #16782 for the SQLite
+   * symptom).
+   *
+   * Any remaining domains that did NOT come from a parent (e.g. supplied via
+   * the explicit `domains` override pointing at a different store) are then
+   * initialized individually — but only the ones the parents didn't already
+   * cover, so we never double-init the same domain instance.
    */
   async init(): Promise<void> {
     // to prevent race conditions, await any current init
@@ -321,72 +500,76 @@ export class MastraCompositeStore extends MastraBase {
       return;
     }
 
-    // Initialize all domain stores
-    const initTasks: Promise<void>[] = [];
-
-    if (this.stores?.memory) {
-      initTasks.push(this.stores.memory.init());
-    }
-
-    if (this.stores?.workflows) {
-      initTasks.push(this.stores.workflows.init());
-    }
-
-    if (this.stores?.scores) {
-      initTasks.push(this.stores.scores.init());
-    }
-
-    if (this.stores?.observability) {
-      initTasks.push(this.stores.observability.init());
-    }
-
-    if (this.stores?.agents) {
-      initTasks.push(this.stores.agents.init());
-    }
-
-    if (this.stores?.datasets) {
-      initTasks.push(this.stores.datasets.init());
-    }
-
-    if (this.stores?.experiments) {
-      initTasks.push(this.stores.experiments.init());
-    }
-
-    if (this.stores?.promptBlocks) {
-      initTasks.push(this.stores.promptBlocks.init());
-    }
-
-    if (this.stores?.scorerDefinitions) {
-      initTasks.push(this.stores.scorerDefinitions.init());
-    }
-
-    if (this.stores?.mcpClients) {
-      initTasks.push(this.stores.mcpClients.init());
-    }
-
-    if (this.stores?.mcpServers) {
-      initTasks.push(this.stores.mcpServers.init());
-    }
-
-    if (this.stores?.workspaces) {
-      initTasks.push(this.stores.workspaces.init());
-    }
-
-    if (this.stores?.skills) {
-      initTasks.push(this.stores.skills.init());
-    }
-
-    if (this.stores?.blobs) {
-      initTasks.push(this.stores.blobs.init());
-    }
-
-    if (this.stores?.backgroundTasks) {
-      initTasks.push(this.stores.backgroundTasks.init());
-    }
-
-    this.hasInitialized = Promise.all(initTasks).then(() => true);
+    this.hasInitialized = this.#runInit();
     await this.hasInitialized;
   }
+
+  async #runInit(): Promise<boolean> {
+    // 1. Delegate to parent stores. Each parent owns its own init contract
+    //    (setup, migrations, sequencing, coalescing). Dedupe by identity so
+    //    a store passed as both `default` and `editor` only gets init()'d once.
+    const uniqueParents = new Set<MastraCompositeStore>();
+    if (this.parentDefault) uniqueParents.add(this.parentDefault);
+    if (this.parentEditor) uniqueParents.add(this.parentEditor);
+    await Promise.all([...uniqueParents].map(parent => parent.init()));
+
+    // 2. Build a set of domain instances the parents already initialized so
+    //    we don't init them a second time below.
+    const alreadyInitialized = new Set<unknown>();
+    const addParentDomains = (parent?: MastraCompositeStore) => {
+      if (!parent?.stores) return;
+      for (const domain of Object.values(parent.stores)) {
+        if (domain) alreadyInitialized.add(domain);
+      }
+    };
+    addParentDomains(this.parentDefault);
+    addParentDomains(this.parentEditor);
+
+    // 3. Init any remaining domains (typically those provided via the
+    //    explicit `domains` override pointing at a different store, or those
+    //    set directly by a subclass).
+    const initTasks: Promise<void>[] = [];
+    const maybeInit = (domain: { init(): Promise<void> } | undefined) => {
+      if (!domain || alreadyInitialized.has(domain)) return;
+      initTasks.push(domain.init());
+      alreadyInitialized.add(domain);
+    };
+
+    if (this.stores) {
+      maybeInit(this.stores.memory);
+      maybeInit(this.stores.workflows);
+      maybeInit(this.stores.scores);
+      maybeInit(this.stores.observability);
+      maybeInit(this.stores.agents);
+      maybeInit(this.stores.datasets);
+      maybeInit(this.stores.experiments);
+      maybeInit(this.stores.promptBlocks);
+      maybeInit(this.stores.scorerDefinitions);
+      maybeInit(this.stores.mcpClients);
+      maybeInit(this.stores.mcpServers);
+      maybeInit(this.stores.workspaces);
+      maybeInit(this.stores.skills);
+      maybeInit(this.stores.favorites);
+      maybeInit(this.stores.blobs);
+      maybeInit(this.stores.backgroundTasks);
+      maybeInit(this.stores.schedules);
+      maybeInit(this.stores.channels);
+      maybeInit(this.stores.harness);
+      maybeInit(this.stores.toolProviderConnections);
+      maybeInit(this.stores.notifications);
+      maybeInit(this.stores.threadState);
+    }
+
+    await Promise.all(initTasks);
+    return true;
+  }
+  /**
+   * Optional lifecycle hook: release underlying client/connection handles.
+   * Implementations (e.g. LibSQLStore) override this to checkpoint WAL files
+   * and close the database client so OS handles are freed synchronously.
+   * Called automatically by Mastra.shutdown().
+   */
+  close?(): Promise<void>;
 }
 
 /**

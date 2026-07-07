@@ -13,6 +13,34 @@ import { PostgresStore } from '@mastra/pg';
 import type { StorageConfig, PgStorageConfig } from './project.js';
 import { getDatabasePath, getVectorDatabasePath } from './project.js';
 
+export const MASTRA_CODE_LOCAL_PRAGMAS = {
+  cacheSize: -128000,
+  mmapSize: 536870912,
+};
+
+/**
+ * Construct a LibSQL store for an arbitrary url/authToken, applying the same
+ * local pragmas the default factory uses. Shared so per-tenant storage
+ * (see `web/tenant-storage.ts`) doesn't duplicate the construction.
+ */
+export function buildLibSQLStore(opts: { id?: string; url: string; authToken?: string }): MastraCompositeStore {
+  return new LibSQLStore({
+    id: opts.id ?? 'mastra-code-storage',
+    url: opts.url,
+    ...(opts.authToken ? { authToken: opts.authToken } : {}),
+    localPragmas: MASTRA_CODE_LOCAL_PRAGMAS,
+  });
+}
+
+/** Construct a LibSQL vector store for an arbitrary url/authToken. */
+export function buildLibSQLVector(opts: { id?: string; url: string; authToken?: string }): MastraVector {
+  return new LibSQLVector({
+    id: opts.id ?? 'mastra-code-vectors',
+    url: opts.url,
+    ...(opts.authToken ? { authToken: opts.authToken } : {}),
+  });
+}
+
 export interface StorageResult {
   storage: MastraCompositeStore;
   /** The effective backend after any fallback logic has run. */
@@ -22,10 +50,7 @@ export interface StorageResult {
 }
 
 function createFallbackLibSQL(): MastraCompositeStore {
-  return new LibSQLStore({
-    id: 'mastra-code-storage',
-    url: `file:${getDatabasePath()}`,
-  });
+  return buildLibSQLStore({ url: `file:${getDatabasePath()}` });
 }
 
 /**
@@ -41,11 +66,7 @@ export async function createStorage(config: StorageConfig): Promise<StorageResul
 
   // Default: LibSQL
   return {
-    storage: new LibSQLStore({
-      id: 'mastra-code-storage',
-      url: config.url,
-      ...(config.authToken ? { authToken: config.authToken } : {}),
-    }),
+    storage: buildLibSQLStore({ url: config.url, authToken: config.authToken }),
     backend: 'libsql',
   };
 }
@@ -127,9 +148,12 @@ export async function createVectorStore(
     });
   }
 
-  // LibSQL: separate file for vectors
-  return new LibSQLVector({
-    id: 'mastra-code-vectors',
-    url: `file:${getVectorDatabasePath()}`,
+  // LibSQL: separate file for vectors. Per-tenant configs supply an explicit
+  // vectorUrl so each tenant's recall vectors are isolated; otherwise use the
+  // shared default file.
+  const libsqlConfig = config as { vectorUrl?: string; vectorAuthToken?: string };
+  return buildLibSQLVector({
+    url: libsqlConfig.vectorUrl ?? `file:${getVectorDatabasePath()}`,
+    authToken: libsqlConfig.vectorAuthToken,
   });
 }

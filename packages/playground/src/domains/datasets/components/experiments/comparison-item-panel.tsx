@@ -1,18 +1,16 @@
 'use client';
 
 import type { CompareExperimentsResponse } from '@mastra/client-js';
-import {
-  Button,
-  ButtonsGroup,
-  Chip,
-  Column,
-  MainHeader,
-  Notice,
-  PrevNextNav,
-  Sections,
-  SideDialog,
-} from '@mastra/playground-ui';
-import { AlertTriangleIcon, FileCodeIcon, FileInputIcon, FileOutputIcon, TargetIcon, XIcon } from 'lucide-react';
+import { Button } from '@mastra/playground-ui/components/Button';
+import { ButtonsGroup } from '@mastra/playground-ui/components/ButtonsGroup';
+import { Chip } from '@mastra/playground-ui/components/Chip';
+import { Column } from '@mastra/playground-ui/components/Columns';
+import { MainHeader } from '@mastra/playground-ui/components/MainHeader';
+import { Notice } from '@mastra/playground-ui/components/Notice';
+import { PrevNextNav } from '@mastra/playground-ui/components/PrevNextNav';
+import { Sections } from '@mastra/playground-ui/components/Sections';
+import { SideDialog } from '@mastra/playground-ui/components/SideDialog';
+import { FileCodeIcon, FileInputIcon, FileOutputIcon, TargetIcon, XIcon } from 'lucide-react';
 import { ScoreDelta } from './score-delta';
 
 type ComparisonItem = CompareExperimentsResponse['items'][number];
@@ -79,8 +77,7 @@ export function ComparisonItemPanel({
         </MainHeader>
 
         {!inBoth ? (
-          <Notice variant="warning">
-            <AlertTriangleIcon />
+          <Notice variant="warning" title="Comparison not available">
             <Notice.Message>
               {(() => {
                 const missingIn = baselineResult ? 'Contender' : 'Baseline';
@@ -88,7 +85,7 @@ export function ComparisonItemPanel({
                 return (
                   <>
                     The {missingIn} experiment was run against dataset{version != null ? ` v. ${version}` : ''}, which
-                    does not contain this item. Comparison is not available.
+                    does not contain this item.
                   </>
                 );
               })()}

@@ -1,4 +1,6 @@
-import { Button, EmptyState, Icon } from '@mastra/playground-ui';
+import { Button } from '@mastra/playground-ui/components/Button';
+import { EmptyState } from '@mastra/playground-ui/components/EmptyState';
+import { Icon } from '@mastra/playground-ui/icons/Icon';
 import { Plus, Database, BookOpen } from 'lucide-react';
 
 export interface EmptyDatasetsTableProps {
@@ -15,7 +17,7 @@ export function EmptyDatasetsTable({ onCreateClick }: EmptyDatasetsTableProps) {
         actionSlot={
           <div className="flex flex-col sm:flex-row gap-2">
             {onCreateClick && (
-              <Button size="lg" variant="light" onClick={onCreateClick}>
+              <Button size="lg" variant="default" onClick={onCreateClick}>
                 <Icon>
                   <Plus />
                 </Icon>

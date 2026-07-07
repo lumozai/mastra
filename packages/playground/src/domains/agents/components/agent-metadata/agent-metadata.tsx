@@ -1,24 +1,15 @@
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
-import { languages } from '@codemirror/language-data';
 import type { GetToolResponse, GetWorkflowResponse } from '@mastra/client-js';
-import {
-  Alert,
-  AlertTitle,
-  AlertDescription,
-  Badge,
-  useCodemirrorTheme,
-  Skeleton,
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-  AgentIcon,
-  MemoryIcon,
-  ProcessorIcon,
-  SkillIcon,
-  ToolsIcon,
-  WorkflowIcon,
-} from '@mastra/playground-ui';
+import { Badge } from '@mastra/playground-ui/components/Badge';
+import { codeLanguages, useCodemirrorTheme } from '@mastra/playground-ui/components/CodeEditor';
+import { Notice } from '@mastra/playground-ui/components/Notice';
+import { Skeleton } from '@mastra/playground-ui/components/Skeleton';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@mastra/playground-ui/components/Tooltip';
+import { AgentIcon } from '@mastra/playground-ui/icons/AgentIcon';
+import { ProcessorIcon } from '@mastra/playground-ui/icons/ProcessorIcon';
+import { SkillIcon } from '@mastra/playground-ui/icons/SkillIcon';
+import { ToolsIcon } from '@mastra/playground-ui/icons/ToolsIcon';
+import { WorkflowIcon } from '@mastra/playground-ui/icons/WorkflowIcon';
 import CodeMirror, { EditorView } from '@uiw/react-codemirror';
 import { GaugeIcon, Folder, Globe } from 'lucide-react';
 import { useActivatedSkills } from '../../context/activated-skills-context';
@@ -30,7 +21,6 @@ import { AgentMetadataModelList } from './agent-metadata-model-list';
 import { AgentMetadataSection } from './agent-metadata-section';
 import { AgentMetadataWrapper } from './agent-metadata-wrapper';
 import { useIsCmsAvailable } from '@/domains/cms/hooks/use-is-cms-available';
-import { useMemory } from '@/domains/memory/hooks';
 import { useScorers } from '@/domains/scores';
 import { WORKSPACE_TOOLS_PREFIX } from '@/domains/workspace/constants';
 import { LoadingBadge } from '@/lib/ai-ui/tools/badges/loading-badge';
@@ -68,14 +58,12 @@ export const AgentMetadataNetworkList = ({ agents }: AgentMetadataNetworkListPro
 
 export const AgentMetadata = ({ agentId }: AgentMetadataProps) => {
   const { data: agent, isLoading } = useAgent(agentId);
-  const { data: memory, isLoading: isMemoryLoading } = useMemory(agentId);
   const { mutate: reorderModelList } = useReorderModelList(agentId);
   const { mutateAsync: updateModelInModelList } = useUpdateModelInModelList(agentId);
   const codemirrorTheme = useCodemirrorTheme();
   const { isCmsAvailable, isLoading: isCmsLoading } = useIsCmsAvailable();
-  const hasMemoryEnabled = Boolean(memory?.result);
 
-  if (isLoading || isMemoryLoading) {
+  if (isLoading) {
     return <Skeleton className="h-full" />;
   }
 
@@ -115,37 +103,6 @@ export const AgentMetadata = ({ agentId }: AgentMetadataProps) => {
           />
         </AgentMetadataSection>
       )}
-
-      <AgentMetadataSection
-        title="Memory"
-        hint={{
-          link: 'https://mastra.ai/en/docs/agents/agent-memory',
-          title: 'Agent Memory documentation',
-        }}
-      >
-        {hasMemoryEnabled ? (
-          <Badge icon={<MemoryIcon />} variant="success" className="font-medium">
-            <span className="sr-only">Memory is enabled</span>
-            <span aria-hidden="true">On</span>
-          </Badge>
-        ) : (
-          <Alert variant="warning">
-            <AlertTitle as="h5">Memory not enabled</AlertTitle>
-            <AlertDescription as="p">
-              Thread messages will not be stored. To activate memory, see the{' '}
-              <a
-                href="https://mastra.ai/en/docs/agents/agent-memory"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="underline"
-              >
-                documentation
-              </a>
-              .
-            </AlertDescription>
-          </Alert>
-        )}
-      </AgentMetadataSection>
 
       {networkAgents.length > 0 && (
         <AgentMetadataSection
@@ -233,13 +190,12 @@ export const AgentMetadata = ({ agentId }: AgentMetadataProps) => {
           className="border border-border1 rounded-md"
           value={extractPrompt(agent.instructions)}
           editable={false}
-          extensions={[markdown({ base: markdownLanguage, codeLanguages: languages }), EditorView.lineWrapping]}
+          extensions={[markdown({ base: markdownLanguage, codeLanguages }), EditorView.lineWrapping]}
           theme={codemirrorTheme}
         />
         {!isCmsLoading && !isCmsAvailable && (
-          <Alert variant="warning">
-            <AlertTitle as="h5">Read-only</AlertTitle>
-            <AlertDescription as="p">
+          <Notice variant="warning" title="Read-only">
+            <Notice.Message>
               To edit the system prompt in Studio, add <code className="font-medium">@mastra/editor</code> to your
               project. See the{' '}
               <a
@@ -251,8 +207,8 @@ export const AgentMetadata = ({ agentId }: AgentMetadataProps) => {
                 documentation
               </a>
               .
-            </AlertDescription>
-          </Alert>
+            </Notice.Message>
+          </Notice>
         )}
       </AgentMetadataSection>
     </AgentMetadataWrapper>

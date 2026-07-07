@@ -17,6 +17,8 @@ type LinkComponentPaths = {
 
   workflowsLink: () => string;
   workflowLink: (workflowId: string) => string;
+  schedulesLink: () => string;
+  scheduleLink: (scheduleId: string) => string;
 
   networkLink: (networkId: string) => string;
   networkNewThreadLink: (networkId: string) => string;
@@ -57,7 +59,9 @@ const LinkComponentContext = createContext<{
   navigate: (path: string) => void;
   paths: LinkComponentPaths;
 }>({
-  Link: forwardRef<HTMLAnchorElement, LinkComponentProps>(() => null),
+  Link: forwardRef<HTMLAnchorElement, LinkComponentProps>(function DefaultLink(_props, _ref) {
+    return null;
+  }),
   navigate: () => {},
   paths: {
     agentLink: () => '',
@@ -68,6 +72,8 @@ const LinkComponentContext = createContext<{
     agentNewThreadLink: () => '',
     workflowsLink: () => '',
     workflowLink: () => '',
+    schedulesLink: () => '',
+    scheduleLink: () => '',
     networkLink: () => '',
     networkNewThreadLink: () => '',
     networkThreadLink: () => '',
@@ -108,6 +114,7 @@ export const LinkComponentProvider = ({ children, Link, navigate, paths }: LinkC
   return <LinkComponentContext.Provider value={{ Link, navigate, paths }}>{children}</LinkComponentContext.Provider>;
 };
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const useLinkComponent = () => {
   const ctx = useContext(LinkComponentContext);
 

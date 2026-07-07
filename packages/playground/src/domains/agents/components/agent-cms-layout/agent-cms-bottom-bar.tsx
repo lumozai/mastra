@@ -1,4 +1,4 @@
-import { Button } from '@mastra/playground-ui';
+import { Button } from '@mastra/playground-ui/components/Button';
 import { ArrowLeft, ArrowRight } from 'lucide-react';
 
 import { useAgentEditFormContext } from '../../context/agent-edit-form-context';
@@ -11,13 +11,14 @@ interface AgentCmsBottomBarProps {
 }
 
 export function AgentCmsBottomBar({ basePath, currentPath }: AgentCmsBottomBarProps) {
-  const { form, isCodeAgentOverride } = useAgentEditFormContext();
+  const { form, isCodeAgentOverride, editorConfig } = useAgentEditFormContext();
   const { navigate } = useLinkComponent();
   const { previous, next, isNextDisabled } = useAgentCmsNavigation(
     basePath,
     currentPath,
     form.control,
     isCodeAgentOverride,
+    editorConfig,
   );
 
   if (!previous && !next) {
@@ -36,7 +37,7 @@ export function AgentCmsBottomBar({ basePath, currentPath }: AgentCmsBottomBarPr
       </div>
       <div>
         {next && (
-          <Button type="button" variant="light" disabled={isNextDisabled} onClick={() => navigate(next.href)}>
+          <Button type="button" variant="default" disabled={isNextDisabled} onClick={() => navigate(next.href)}>
             {next.name}
             <ArrowRight />
           </Button>

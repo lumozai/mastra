@@ -7,7 +7,7 @@ import type { BrowserConfigBase } from '@mastra/core/browser';
 /**
  * Supported CLI providers that can be used with BrowserViewer.
  */
-export type CLIProvider = 'agent-browser' | 'browser-use' | 'browse-cli';
+export type CLIProvider = 'agent-browser' | 'browser-use' | 'browse' | 'browse-cli';
 
 /**
  * Configuration for BrowserViewer.
@@ -26,10 +26,4 @@ export interface BrowserViewerConfig extends BrowserConfigBase {
    * @default 0 (auto-assign available port)
    */
   cdpPort?: number;
-
-  /**
-   * Path to Chrome user data directory (profile).
-   * Persists cookies, localStorage, extensions, etc.
-   */
-  userDataDir?: string;
 }

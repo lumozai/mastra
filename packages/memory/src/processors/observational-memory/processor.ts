@@ -7,6 +7,7 @@ import type { ObservationalMemoryRecord } from '@mastra/core/storage';
 import { OBSERVATION_CONTINUATION_HINT } from './constants';
 import { omDebug } from './debug';
 import type { ObservationTurn } from './observation-turn/index';
+import { loadMemoryContextMessages } from './observation-turn/load-memory-context';
 import type { ObservationalMemory } from './observational-memory';
 import { isOmReproCaptureEnabled, safeCaptureJson, writeProcessInputStepReproCapture } from './repro-capture';
 import { insertTemporalGapMarkers } from './temporal-markers';
@@ -59,6 +60,42 @@ const GATEWAY_STATE_KEY = '__isGatewayModel';
 /** Check if the model is routed through a Mastra gateway (duck-type check to avoid cross-package instanceof issues). */
 function isMastraGatewayModel(model: ProcessInputStepArgs['model']): boolean {
   return typeof model === 'object' && model !== null && 'gatewayId' in model && (model as any).gatewayId === 'mastra';
+}
+
+function injectObservationContextMessages({
+  messageList,
+  systemMessages,
+  continuationMessage,
+  threadId,
+  resourceId,
+}: {
+  messageList: MessageList;
+  systemMessages: string[] | undefined;
+  continuationMessage: MastraDBMessage | undefined;
+  threadId: string;
+  resourceId?: string;
+}): void {
+  if (!systemMessages?.length) {
+    return;
+  }
+
+  messageList.clearSystemMessages('observational-memory');
+  for (const msg of systemMessages) {
+    messageList.addSystem(msg, 'observational-memory');
+  }
+
+  const contMsg = continuationMessage ?? {
+    id: 'om-continuation',
+    role: 'user' as const,
+    createdAt: new Date(0),
+    content: {
+      format: 2 as const,
+      parts: [{ type: 'text' as const, text: `<system-reminder>${OBSERVATION_CONTINUATION_HINT}</system-reminder>` }],
+    },
+    threadId,
+    resourceId,
+  };
+  messageList.add(contMsg, 'memory');
 }
 
 export class ObservationalMemoryProcessor implements Processor<'observational-memory'> {
@@ -124,7 +161,9 @@ export class ObservationalMemoryProcessor implements Processor<'observational-me
     const memoryContext = parseMemoryRequestContext(requestContext);
     const readOnly = memoryContext?.memoryConfig?.readOnly;
 
-    const actorModelContext = model?.modelId ? { provider: model.provider, modelId: model.modelId } : undefined;
+    const actorModelContext = model?.modelId
+      ? { provider: model.provider, modelId: model.modelId, providerOptions: args.providerOptions }
+      : undefined;
     state.__omActorModelContext = actorModelContext;
 
     return this.engine.getTokenCounter().runWithModelContext(actorModelContext, async () => {
@@ -140,8 +179,32 @@ export class ObservationalMemoryProcessor implements Processor<'observational-me
         ? (safeCaptureJson(messageList.serialize()) as ReturnType<MessageList['serialize']>)
         : null;
 
-      // ── Read-only fast path: skip turn creation and observation lifecycle ──
+      // ── Read-only path: load existing context, skip observation lifecycle ──
       if (readOnly) {
+        const ctx = await loadMemoryContextMessages({
+          memory: this.memory,
+          messageList,
+          threadId,
+          resourceId,
+        });
+        const systemMessages =
+          ctx.hasObservations && ctx.omRecord
+            ? await this.engine.buildContextSystemMessages({
+                threadId,
+                resourceId,
+                record: ctx.omRecord,
+                unobservedContextBlocks: ctx.otherThreadsContext,
+              })
+            : undefined;
+
+        injectObservationContextMessages({
+          messageList,
+          systemMessages,
+          continuationMessage: ctx.continuationMessage,
+          threadId,
+          resourceId,
+        });
+
         return messageList;
       }
 
@@ -151,6 +214,17 @@ export class ObservationalMemoryProcessor implements Processor<'observational-me
       // processOutputResult. In production, getInputProcessors() and
       // getOutputProcessors() each call createOMProcessor(), producing two
       // different instances that share only the processorStates map.
+      const activeTurn = (state.__omTurn as ObservationTurn | undefined) ?? this.turn;
+      if (activeTurn && activeTurn.messageList !== messageList) {
+        // Durable runs may deserialize a fresh MessageList between loop iterations. End the
+        // old turn first so any messages tracked on that list are flushed before OM moves on.
+        await activeTurn.end().catch(() => {});
+        if (this.turn === activeTurn) {
+          this.turn = undefined;
+        }
+        state.__omTurn = undefined;
+      }
+
       if (!this.turn || !state.__omTurn) {
         // End previous turn if state was reset mid-flow
         if (this.turn && !state.__omTurn) {
@@ -160,19 +234,28 @@ export class ObservationalMemoryProcessor implements Processor<'observational-me
           threadId,
           resourceId,
           messageList,
+          agent: args.agent,
           observabilityContext: getOmObservabilityContext(args),
           hooks: {
             onBufferChunkSealed: rotateResponseMessageId,
+            onSyncObservationComplete: rotateResponseMessageId,
           },
         });
         this.turn.writer = writer;
+        this.turn.sendSignal = args.sendSignal;
+        this.turn.agent = args.agent;
         this.turn.requestContext = requestContext;
         await this.turn.start(this.memory);
         if (stepNumber === 0 && this.temporalMarkers) {
-          await insertTemporalGapMarkers({ messageList, writer });
+          await insertTemporalGapMarkers({ messageList, sendSignal: args.sendSignal });
         }
         state.__omTurn = this.turn;
       }
+
+      this.turn.addHooks({
+        onBufferChunkSealed: rotateResponseMessageId,
+        onSyncObservationComplete: rotateResponseMessageId,
+      });
 
       const observabilityContext = getOmObservabilityContext(args);
       state.__omObservabilityContext = observabilityContext;
@@ -198,27 +281,13 @@ export class ObservationalMemoryProcessor implements Processor<'observational-me
         }
 
         // Inject system messages (one per cache-stable chunk) + continuation
-        if (ctx.systemMessage) {
-          messageList.clearSystemMessages('observational-memory');
-          for (const msg of ctx.systemMessage) {
-            messageList.addSystem(msg, 'observational-memory');
-          }
-
-          const contMsg = this.turn.context.continuation ?? {
-            id: 'om-continuation',
-            role: 'user' as const,
-            createdAt: new Date(0),
-            content: {
-              format: 2 as const,
-              parts: [
-                { type: 'text' as const, text: `<system-reminder>${OBSERVATION_CONTINUATION_HINT}</system-reminder>` },
-              ],
-            },
-            threadId,
-            resourceId,
-          };
-          messageList.add(contMsg, 'memory');
-        }
+        injectObservationContextMessages({
+          messageList,
+          systemMessages: ctx.systemMessage,
+          continuationMessage: this.turn.context.continuation,
+          threadId,
+          resourceId,
+        });
 
         // ── Progress emission (processor-specific) ──────────
         // Fetch a fresh record from storage so buffering flags (e.g.
@@ -303,6 +372,17 @@ export class ObservationalMemoryProcessor implements Processor<'observational-me
           await turn.end();
           this.turn = undefined;
           state.__omTurn = undefined;
+        } else {
+          // No turn exists — this happens during a resumed stream where input processors
+          // were skipped (isResume=true), so processInputStep never created a turn.
+          // Directly persist any new response messages so the final assistant text
+          // from the resumed turn is not lost.
+          const newOutput = messageList.get.response.db();
+          const newInput = messageList.get.input.db();
+          const messagesToSave = [...newInput, ...newOutput];
+          if (messagesToSave.length > 0 && context.threadId) {
+            await this.engine.persistMessages(messagesToSave, context.threadId, context.resourceId);
+          }
         }
 
         return messageList;

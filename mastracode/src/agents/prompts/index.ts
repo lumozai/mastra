@@ -2,15 +2,14 @@
  * Prompt system — exports the prompt builder and mode-specific prompts.
  */
 
-export { buildBasePrompt } from './base.js';
 export { buildModePrompt, buildModePromptFn } from './build.js';
 export { planModePrompt } from './plan.js';
 export { fastModePrompt } from './fast.js';
 
+import { buildBasePrompt } from '@mastra/core/coding-agent';
+import type { PromptContext as BasePromptContext } from '@mastra/core/coding-agent';
 import { hasTavilyKey } from '../../tools/index.js';
 import { loadAgentInstructions, formatAgentInstructions } from './agent-instructions.js';
-import { buildBasePrompt } from './base.js';
-import type { PromptContext as BasePromptContext } from './base.js';
 import { buildModePromptFn } from './build.js';
 import { fastModePrompt } from './fast.js';
 import { modelSpecificPrompts } from './model.js';
@@ -37,7 +36,7 @@ const modePrompts: Record<string, string | ((ctx: PromptContext) => string)> = {
  */
 export function buildFullPrompt(ctx: PromptContext): string {
   // Determine whether web search tools are available
-  const modelId = ctx.state?.currentModelId as string | undefined;
+  const modelId = ctx.modelId;
   const hasWebSearch = hasTavilyKey() || (!!modelId && modelId.startsWith('anthropic/'));
 
   // Collect per-tool deny rules so guidance omits denied tools
@@ -58,6 +57,7 @@ export function buildFullPrompt(ctx: PromptContext): string {
     projectName: ctx.projectName || 'unknown',
     gitBranch: ctx.gitBranch,
     platform: process.platform,
+    commonBinaries: ctx.commonBinaries,
     date: ctx.currentDate,
     mode: ctx.modeId,
     modelId: ctx.modelId,
@@ -72,28 +72,17 @@ export function buildFullPrompt(ctx: PromptContext): string {
     ? (modelSpecificPrompts[ctx.modelId as keyof typeof modelSpecificPrompts] ?? '')
     : '';
 
-  // Inject current task state so agent doesn't lose track after OM truncation
-  let taskSection = '';
-  const tasks = ctx.state?.tasks as { content: string; status: string; activeForm: string }[] | undefined;
-  if (tasks && tasks.length > 0) {
-    const lines = tasks.map(t => {
-      const icon = t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '▸' : '○';
-      return `  ${icon} [${t.status}] ${t.content}`;
-    });
-    taskSection = `\n<current-task-list>\n${lines.join('\n')}\n</current-task-list>\n`;
-  }
+  // The current task list is carried on the agent state-signal lane (see
+  // TaskStateProcessor) rather than injected into the cached system prompt. This
+  // keeps the prompt prefix stable across task updates (preserving prompt cache)
+  // while still surviving observational-memory truncation.
 
   // Load and inject agent instructions from AGENTS.md/CLAUDE.md files
-  const instructionSources = loadAgentInstructions(ctx.workingDir);
+  const configDir = ctx.state?.configDir as string | undefined;
+  const instructionSources = loadAgentInstructions(ctx.workingDir, configDir);
   const instructionsSection = formatAgentInstructions(instructionSources);
 
-  const sections = [
-    base,
-    taskSection.trim(),
-    instructionsSection.trim(),
-    modelSpecific.trim(),
-    modeSpecific.trim(),
-  ].filter(Boolean);
+  const sections = [base, instructionsSection.trim(), modelSpecific.trim(), modeSpecific.trim()].filter(Boolean);
 
   return sections.join('\n\n');
 }
