@@ -1,0 +1,135 @@
+---
+title: "Lumoz exporter | Integrations | Observability"
+description: "Send traces to Lumoz using OpenTelemetry and OpenInference semantic conventions"
+packages:
+  - "@mastra/lumoz"
+  - "@mastra/core"
+  - "@mastra/observability"
+---
+
+# Lumoz exporter
+
+[Lumoz](https://lumoz.ai/) provides observability for AI applications. The Lumoz exporter sends traces using OpenTelemetry and [OpenInference](https://github.com/Arize-ai/openinference/tree/main/spec) semantic conventions.
+
+## Installation
+
+```bash npm2yarn
+npm install @mastra/lumoz@latest
+```
+
+## Configuration
+
+### Environment variables
+
+```bash title=".env"
+# Required
+LUMOZ_API_KEY=client_id:client_secret
+
+# Optional
+LUMOZ_ENDPOINT=https://api.lumoz.ai/proxy/v1/traces
+LUMOZ_BASE_URL=https://api.lumoz.ai
+```
+
+`LUMOZ_ENDPOINT` is preferred for endpoint overrides. If omitted, the exporter uses `https://api.lumoz.ai/proxy/v1/traces`.
+
+`OTEL_ENDPOINT` is accepted as a legacy fallback for existing examples.
+
+### Zero-Config Setup
+
+With environment variables set, use the exporter with no configuration:
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { LumozExporter } from '@mastra/lumoz'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      lumoz: {
+        serviceName: 'my-service',
+        exporters: [new LumozExporter()],
+      },
+    },
+  }),
+})
+```
+
+### Explicit Configuration
+
+You can also pass credentials directly:
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { LumozExporter } from '@mastra/lumoz'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      lumoz: {
+        serviceName: 'my-service',
+        exporters: [
+          new LumozExporter({
+            apiKey: process.env.LUMOZ_API_KEY!,
+            endpoint: 'https://api.lumoz.ai/proxy/v1/traces',
+          }),
+        ],
+      },
+    },
+  }),
+})
+```
+
+### Subtenant routing
+
+Pass `subtenantId` to route traces to a Lumoz subtenant:
+
+```typescript
+new LumozExporter({
+  apiKey: process.env.LUMOZ_API_KEY!,
+  subtenantId: 'customer-tenant-id',
+})
+```
+
+For multi-subtenant applications, create one exporter instance per subtenant so OTLP batches do not mix spans that require different `x-lumoz-subtenant-id` headers.
+
+## Configuration options
+
+```typescript
+new LumozExporter({
+  // Lumoz configuration
+  apiKey: 'client_id:client_secret',
+  endpoint: 'https://api.lumoz.ai/proxy/v1/traces',
+  baseUrl: 'https://api.lumoz.ai',
+  subtenantId: 'customer-tenant-id',
+
+  // Optional additional headers. Lumoz auth, accept, and subtenant headers are managed internally.
+  headers: {
+    'x-custom-header': 'value',
+  },
+
+  // Debug and performance tuning
+  logLevel: 'debug',
+  batchSize: 512,
+  timeout: 30000,
+
+  // Custom resource attributes
+  resourceAttributes: {
+    'deployment.environment': process.env.NODE_ENV,
+    'service.version': process.env.APP_VERSION,
+  },
+})
+```
+
+The exporter automatically sets Lumoz Basic auth, `accept: application/x-protobuf`, and `x-lumoz-subtenant-id` when `subtenantId` is configured.
+
+## OpenInference semantic conventions
+
+This exporter implements the [OpenInference Semantic Conventions](https://github.com/Arize-ai/openinference/tree/main/spec) for generative AI applications, providing standardized trace structure across different observability platforms.
+
+## Related
+
+- [Tracing Overview](/docs/observability/tracing/overview)
+- [LumozExporter reference](/reference/observability/tracing/exporters/lumoz)
+- [OpenInference Specification](https://github.com/Arize-ai/openinference/tree/main/spec)

@@ -448,6 +448,7 @@ const sidebars = {
                   id: 'observability/tracing/exporters/langsmith',
                   label: 'LangSmith',
                 },
+                { type: 'doc', id: 'observability/tracing/exporters/lumoz', label: 'Lumoz' },
                 {
                   type: 'doc',
                   id: 'observability/tracing/exporters/mastra-platform-exporter',

@@ -1,0 +1,153 @@
+---
+title: "Reference: LumozExporter | Observability"
+description: Lumoz exporter for Tracing using OpenInference
+packages:
+  - "@mastra/lumoz"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# LumozExporter
+
+Sends Tracing data to Lumoz using OpenTelemetry and OpenInference semantic conventions.
+
+## Constructor
+
+```typescript prettier:false
+new LumozExporter(config: LumozExporterConfig)
+```
+
+## `LumozExporterConfig`
+
+```typescript
+type LumozExporterConfig = Omit<OtelExporterConfig, 'provider' | 'exporter'> & {
+  apiKey?: string
+  endpoint?: string
+  baseUrl?: string
+  headers?: Record<string, string>
+  subtenantId?: string
+}
+```
+
+Inherits from `OtelExporterConfig` (excluding `provider` and `exporter`), which includes:
+
+- `timeout?: number` - Export timeout in milliseconds (default: 30000)
+- `batchSize?: number` - Number of spans per batch (default: 512)
+- `logLevel?: LogLevel | 'debug' | 'info' | 'warn' | 'error'` - Log level (default: WARN)
+- `resourceAttributes?: Record<string, any>` - Custom resource attributes
+
+<PropertiesTable
+  props={[
+  {
+    name: 'apiKey',
+    type: 'string',
+    description: 'Lumoz API key formatted as client_id:client_secret. Falls back to LUMOZ_API_KEY env var.',
+    required: false,
+  },
+  {
+    name: 'endpoint',
+    type: 'string',
+    description:
+      'Full Lumoz OTLP traces endpoint. Falls back to LUMOZ_ENDPOINT, then legacy OTEL_ENDPOINT, then baseUrl + /proxy/v1/traces.',
+    required: false,
+  },
+  {
+    name: 'baseUrl',
+    type: 'string',
+    description:
+      'Lumoz API base URL used when endpoint is omitted. Falls back to LUMOZ_BASE_URL, then https://api.lumoz.ai.',
+    required: false,
+  },
+  {
+    name: 'headers',
+    type: 'Record<string, string>',
+    description:
+      'Additional headers for OTLP requests. The accept, authorization, and subtenant headers are managed internally.',
+    required: false,
+  },
+  {
+    name: 'subtenantId',
+    type: 'string',
+    description: 'Lumoz subtenant routing ID. Sent as x-lumoz-subtenant-id.',
+    required: false,
+  },
+  {
+    name: 'timeout',
+    type: 'number',
+    description: 'Timeout in milliseconds before exporting spans (default: 30000)',
+    required: false,
+  },
+  {
+    name: 'batchSize',
+    type: 'number',
+    description: 'Number of spans to batch before export (default: 512)',
+    required: false,
+  },
+  {
+    name: 'logLevel',
+    type: "'debug' | 'info' | 'warn' | 'error'",
+    description: "Logger level (default: 'warn')",
+    required: false,
+  },
+  {
+    name: 'resourceAttributes',
+    type: 'Record<string, any>',
+    description: 'Custom resource attributes added to each span',
+    required: false,
+  },
+]}
+/>
+
+## Usage
+
+### Zero-Config (using environment variables)
+
+```typescript
+import { LumozExporter } from '@mastra/lumoz'
+
+// Set LUMOZ_API_KEY. LUMOZ_ENDPOINT is optional.
+const exporter = new LumozExporter()
+```
+
+### Explicit Configuration
+
+```typescript
+import { LumozExporter } from '@mastra/lumoz'
+
+const exporter = new LumozExporter({
+  apiKey: process.env.LUMOZ_API_KEY!,
+  endpoint: 'https://api.lumoz.ai/proxy/v1/traces',
+})
+```
+
+### Subtenant Routing
+
+```typescript
+const exporter = new LumozExporter({
+  apiKey: process.env.LUMOZ_API_KEY!,
+  subtenantId: 'customer-tenant-id',
+})
+```
+
+## `OpenInference` semantic conventions
+
+The LumozExporter implements [OpenInference Semantic Conventions](https://github.com/Arize-ai/openinference/tree/main/spec) for generative AI applications, providing standardized trace structure across different observability platforms.
+
+## Tags support
+
+The LumozExporter supports trace tagging for categorization and filtering. Tags are only applied to root spans and are mapped to the native OpenInference `tag.tags` semantic convention.
+
+### Usage
+
+```typescript
+const result = await agent.generate('Hello', {
+  tracingOptions: {
+    tags: ['production', 'experiment-v2', 'user-request'],
+  },
+})
+```
+
+## Related
+
+- [LumozExporter Documentation](/docs/observability/integrations/exporters/lumoz)
+- [OpenInference Specification](https://github.com/Arize-ai/openinference/tree/main/spec)

@@ -835,6 +835,11 @@ const sidebars = {
                     },
                     {
                       type: 'doc',
+                      id: 'observability/integrations/exporters/lumoz',
+                      label: 'Lumoz',
+                    },
+                    {
+                      type: 'doc',
                       id: 'observability/integrations/exporters/otel',
                       label: 'OpenTelemetry',
                     },
