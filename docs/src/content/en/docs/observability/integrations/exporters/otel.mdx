@@ -8,7 +8,7 @@ packages:
 
 # OpenTelemetry exporter
 
-The OpenTelemetry (OTEL) exporter sends your traces and logs to any OTEL-compatible observability platform using standardized [OpenTelemetry Semantic Conventions for GenAI](https://opentelemetry.io/docs/specs/semconv/gen-ai/). This ensures broad compatibility with platforms like Datadog, New Relic, SigNoz, MLflow, Latitude, Dash0, Traceloop, Laminar, and more.
+The OpenTelemetry (OTEL) exporter sends your traces and logs to any OTEL-compatible observability platform using standardized [OpenTelemetry Semantic Conventions for GenAI](https://opentelemetry.io/docs/specs/semconv/gen-ai/). This ensures broad compatibility with platforms like Datadog, New Relic, SigNoz, MLflow, Latitude, Dash0, Traceloop, Laminar, Lumoz, and more.
 
 :::info Looking for bidirectional OTEL integration?
 
@@ -20,7 +20,7 @@ If you have existing OpenTelemetry instrumentation and want Mastra traces to inh
 
 Each provider requires specific protocol packages. Install the base exporter plus the protocol package for your provider:
 
-### For HTTP/Protobuf Providers (SigNoz, New Relic, Laminar, MLflow, Latitude)
+### For HTTP/Protobuf Providers (SigNoz, New Relic, Laminar, MLflow, Latitude, Lumoz)
 
 ```bash npm2yarn
 npm install @mastra/otel-exporter@latest @opentelemetry/exporter-trace-otlp-proto
@@ -49,6 +49,8 @@ All providers support zero-config setup via environment variables. Set the appro
 | New Relic | `NEW_RELIC_LICENSE_KEY` (required), `NEW_RELIC_ENDPOINT` (optional) |
 | Traceloop | `TRACELOOP_API_KEY` (required), `TRACELOOP_DESTINATION_ID`, `TRACELOOP_ENDPOINT` (optional) |
 | Laminar | `LMNR_PROJECT_API_KEY` (required), `LAMINAR_ENDPOINT` (optional) |
+
+Lumoz uses the `custom` provider configuration shown below. Set `LUMOZ_API_KEY` in `client_id:client_secret` format, optionally set `LUMOZ_ENDPOINT`, and pass those values into the custom config.
 
 ## Provider configurations
 
@@ -90,6 +92,66 @@ new OtelExporter({
 ```
 
 Sign up at [console.latitude.so](https://console.latitude.so/login), or self-host and point the endpoint at your own ingestion host.
+
+### Lumoz
+
+[Lumoz](https://lumoz.ai) is an agentic production ops platform that discovers unknowns in all agent traffic, from dev to production — new cohorts, unbuilt use cases, silent model/API changes, agent capability & coordination gaps — and ships the fix + the eval. Use the `custom` provider with HTTP/Protobuf, send traces to the Lumoz OTLP endpoint, and authenticate with `LUMOZ_API_KEY` in `client_id:client_secret` format.
+
+#### Custom OTEL configuration
+
+```bash title=".env"
+# Required
+LUMOZ_API_KEY=client_id:client_secret
+
+# Optional
+LUMOZ_ENDPOINT=https://api.lumoz.ai/proxy/v1/traces
+LUMOZ_SUBTENANT_ID=tenant-123
+```
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { OtelExporter } from '@mastra/otel-exporter'
+
+const lumozApiKey = process.env.LUMOZ_API_KEY
+
+if (!lumozApiKey) {
+  throw new Error('LUMOZ_API_KEY is required')
+}
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      otel: {
+        serviceName: 'my-service',
+        exporters: [
+          new OtelExporter({
+            provider: {
+              custom: {
+                endpoint: process.env.LUMOZ_ENDPOINT || 'https://api.lumoz.ai/proxy/v1/traces',
+                protocol: 'http/protobuf',
+                headers: {
+                  accept: 'application/x-protobuf',
+                  authorization: `Basic ${Buffer.from(lumozApiKey, 'utf-8').toString('base64')}`,
+                  ...(process.env.LUMOZ_SUBTENANT_ID
+                    ? { 'x-lumoz-subtenant-id': process.env.LUMOZ_SUBTENANT_ID }
+                    : {}),
+                },
+              },
+            },
+          }),
+        ],
+      },
+    },
+  }),
+})
+```
+
+:::tip Lumoz-native exporter
+
+For Lumoz-specific setup, use the dedicated [`@mastra/lumoz`](/docs/observability/integrations/exporters/lumoz) exporter instead. It handles Basic auth header construction, the default Lumoz endpoint, and optional subtenant headers for you.
+
+:::
 
 ### Dash0
 
@@ -479,6 +541,7 @@ Choose the right protocol package based on your provider:
 | New Relic | HTTP/Protobuf | `@opentelemetry/exporter-trace-otlp-proto` |
 | Traceloop | HTTP/JSON | `@opentelemetry/exporter-trace-otlp-http` |
 | Laminar | HTTP/Protobuf | `@opentelemetry/exporter-trace-otlp-proto` |
+| Lumoz | HTTP/Protobuf | `@opentelemetry/exporter-trace-otlp-proto` |
 | Custom | Varies | Depends on your collector |
 
 :::warning
