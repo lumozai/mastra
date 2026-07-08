@@ -9,7 +9,7 @@ import PropertiesTable from "@site/src/components/PropertiesTable";
 
 # OtelExporter
 
-Sends traces and logs to any OpenTelemetry-compatible observability platform. Traces use the standardized GenAI semantic conventions; logs carry their original severity and message body and are correlated to traces via both the OTEL log record's native trace context and `mastra.traceId` / `mastra.spanId` attributes. Providers without a built-in config, such as Lumoz, can be configured through the `custom` provider.
+Sends traces and logs to any OpenTelemetry-compatible observability platform. Traces use the standardized GenAI semantic conventions; logs carry their original severity and message body and are correlated to traces via both the OTEL log record's native trace context and `mastra.traceId` / `mastra.spanId` attributes.
 
 ## Constructor
 
@@ -337,36 +337,6 @@ const exporter = new OtelExporter({
   logLevel: 'debug',
 })
 ```
-
-### Lumoz via Custom Endpoint
-
-Lumoz accepts OTLP traces over HTTP/Protobuf. Use the `custom` provider, set `LUMOZ_API_KEY` in `client_id:client_secret` format, and optionally include `x-lumoz-subtenant-id` for subtenant routing.
-
-```typescript
-const lumozApiKey = process.env.LUMOZ_API_KEY
-
-if (!lumozApiKey) {
-  throw new Error('LUMOZ_API_KEY is required')
-}
-
-const exporter = new OtelExporter({
-  provider: {
-    custom: {
-      endpoint: process.env.LUMOZ_ENDPOINT || 'https://api.lumoz.ai/proxy/v1/traces',
-      protocol: 'http/protobuf',
-      headers: {
-        accept: 'application/x-protobuf',
-        authorization: `Basic ${Buffer.from(lumozApiKey, 'utf-8').toString('base64')}`,
-        ...(process.env.LUMOZ_SUBTENANT_ID
-          ? { 'x-lumoz-subtenant-id': process.env.LUMOZ_SUBTENANT_ID }
-          : {}),
-      },
-    },
-  },
-})
-```
-
-For Lumoz-specific setup, prefer the dedicated [`@mastra/lumoz`](/reference/observability/tracing/exporters/lumoz) exporter. It handles Basic auth header construction, the default Lumoz endpoint, and optional subtenant headers.
 
 ## Protocol requirements
 
